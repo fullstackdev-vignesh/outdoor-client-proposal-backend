@@ -10,6 +10,7 @@ const clientRoutes = require('./routes/clientRoutes');
 const bookingRoutes = require('./routes/bookingRoutes');
 const proposalRoutes = require('./routes/proposalRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');
+const locationRoutes = require('./routes/locationRoutes');
 const { pptRouter, excelRouter } = require('./routes/templateRoutes');
 
 const app = express();
@@ -21,6 +22,7 @@ app.use(express.urlencoded({ extended: true }));
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
 app.use('/generated', express.static(path.join(__dirname, '..', 'generated')));
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 app.use('/admin', authRoutes);
 app.use('/api/auth', authRoutes);
@@ -30,6 +32,7 @@ app.use('/api/clients', clientRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/proposals', proposalRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/locations', locationRoutes);
 app.use('/api/ppt-templates', pptRouter);
 app.use('/api/excel-templates', excelRouter);
 

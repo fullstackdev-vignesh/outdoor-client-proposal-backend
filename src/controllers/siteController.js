@@ -1,19 +1,43 @@
 const asyncHandler = require('express-async-handler');
+const XLSX = require('xlsx');
 const Site = require('../models/Site');
+const SiteHistory = require('../models/SiteHistory');
+const { saveMediaImage } = require('../utils/imageStorage');
+const { calcDurationDays, calcBookingAmount } = require('../utils/bookingCalc');
 
 const IST_OFFSET_MS = 330 * 60000;
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
+
+const TRACKED_FIELDS = [
+  'mediaId', 'mediaType', 'quantity', 'state', 'city', 'location', 'areaName', 'locationDetails',
+  'latitude', 'longitude', 'illumination', 'width', 'height', 'sizeUnit', 'amount', 'gstAmount',
+  'monthlyAmount', 'printingCost', 'mountingCost', 'totalCost', 'image', 'isActive', 'mediaStatus',
+];
+
+async function logFieldChanges(siteId, before, after, userId) {
+  const entries = [];
+  for (const field of TRACKED_FIELDS) {
+    const oldVal = before ? before[field] : undefined;
+    const newVal = after ? after[field] : undefined;
+    const oldStr = oldVal === undefined || oldVal === null ? '' : String(oldVal);
+    const newStr = newVal === undefined || newVal === null ? '' : String(newVal);
+    if (oldStr !== newStr) {
+      entries.push({ site: siteId, field, oldValue: oldVal, newValue: newVal, changedBy: userId, changedAt: nowIST() });
+    }
+  }
+  if (entries.length) await SiteHistory.insertMany(entries);
+}
 
 const buildFilter = (query) => {
   const filter = {};
   if (query.search) {
     filter.$or = [
       { mediaId: new RegExp(query.search, 'i') },
-      { mediaName: new RegExp(query.search, 'i') },
       { mediaType: new RegExp(query.search, 'i') },
       { city: new RegExp(query.search, 'i') },
       { state: new RegExp(query.search, 'i') },
       { location: new RegExp(query.search, 'i') },
+      { areaName: new RegExp(query.search, 'i') },
     ];
   }
   if (query.mediaType) filter.mediaType = query.mediaType;
@@ -42,7 +66,7 @@ const getSites = asyncHandler(async (req, res) => {
     Site.countDocuments(filter),
   ]);
 
-  res.json({ items, total, page, pages: Math.ceil(total / limit) });
+  res.json({ items: items.map((s) => ({ ...s.toObject(), mediaCode: s.mediaId })), total, page, pages: Math.ceil(total / limit) });
 });
 
 const getAvailableSites = asyncHandler(async (req, res) => {
@@ -66,14 +90,48 @@ const getSite = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error('Site not found');
   }
-  res.json(site);
+  res.json({ ...site.toObject(), mediaCode: site.mediaId });
 });
 
+function validateSitePayload(body) {
+  const errors = [];
+  const num = (v) => (v === '' || v === undefined || v === null ? undefined : Number(v));
+
+  if (body.width !== undefined && (isNaN(num(body.width)) || num(body.width) <= 0)) errors.push('Width must be a number greater than 0');
+  if (body.height !== undefined && (isNaN(num(body.height)) || num(body.height) <= 0)) errors.push('Height must be a number greater than 0');
+  ['amount', 'gstAmount', 'monthlyAmount', 'printingCost', 'mountingCost'].forEach((f) => {
+    if (body[f] !== undefined && (isNaN(num(body[f])) || num(body[f]) < 0)) errors.push(`${f} must be a number greater than or equal to 0`);
+  });
+  if (body.latitude !== undefined && body.latitude !== '' && (isNaN(num(body.latitude)) || num(body.latitude) < -90 || num(body.latitude) > 90)) {
+    errors.push('Latitude must be between -90 and 90');
+  }
+  if (body.longitude !== undefined && body.longitude !== '' && (isNaN(num(body.longitude)) || num(body.longitude) < -180 || num(body.longitude) > 180)) {
+    errors.push('Longitude must be between -180 and 180');
+  }
+  if (body.mediaStatus && !['available', 'booked', 'blocked'].includes(body.mediaStatus)) {
+    errors.push('Invalid media status');
+  }
+  return errors;
+}
+
+function normalizeSiteBody(body) {
+  const payload = { ...body };
+  if (payload.mediaCode && !payload.mediaId) payload.mediaId = payload.mediaCode;
+  delete payload.mediaCode;
+  return payload;
+}
+
 const createSite = asyncHandler(async (req, res) => {
-  const payload = { ...req.body, createdBy: req.user._id };
+  const payload = normalizeSiteBody(req.body);
+  const errors = validateSitePayload(payload);
+  if (errors.length) {
+    res.status(400);
+    throw new Error(errors.join('; '));
+  }
+  payload.createdBy = req.user._id;
   if (!payload.mediaStatus) payload.mediaStatus = 'available';
   const site = await Site.create(payload);
-  res.status(201).json(site);
+  res.status(201).json({ ...site.toObject(), mediaCode: site.mediaId });
 });
 
 const updateSite = asyncHandler(async (req, res) => {
@@ -82,9 +140,17 @@ const updateSite = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error('Site not found');
   }
-  Object.assign(site, req.body);
+  const payload = normalizeSiteBody(req.body);
+  const errors = validateSitePayload(payload);
+  if (errors.length) {
+    res.status(400);
+    throw new Error(errors.join('; '));
+  }
+  const before = site.toObject();
+  Object.assign(site, payload);
   await site.save();
-  res.json(site);
+  await logFieldChanges(site._id, before, site.toObject(), req.user._id);
+  res.json({ ...site.toObject(), mediaCode: site.mediaId });
 });
 
 const deleteSite = asyncHandler(async (req, res) => {
@@ -97,6 +163,28 @@ const deleteSite = asyncHandler(async (req, res) => {
   res.json({ message: 'Site deleted' });
 });
 
+function buildBookingInfo(site, bookingInfo, userId) {
+  const { customerType, client, startDate, endDate } = bookingInfo || {};
+  if (!client) throw new Error('Customer is required');
+  if (!startDate || !endDate) throw new Error('Start Date and End Date are required');
+  if (new Date(endDate) < new Date(startDate)) throw new Error('End Date must be on or after Start Date');
+
+  const durationDays = calcDurationDays(startDate, endDate);
+  const monthlyTotalCost = site.totalCost || site.monthlyAmount || 0;
+  const amount = calcBookingAmount(monthlyTotalCost, durationDays);
+
+  return {
+    customerType: customerType === 'agency' ? 'agency' : 'client',
+    client,
+    startDate,
+    endDate,
+    durationDays,
+    monthlyTotalCost,
+    amount,
+    bookedBy: userId,
+  };
+}
+
 const changeStatus = asyncHandler(async (req, res) => {
   const site = await Site.findById(req.params.id);
   if (!site) {
@@ -104,6 +192,7 @@ const changeStatus = asyncHandler(async (req, res) => {
     throw new Error('Site not found');
   }
   const { mediaStatus, blockReason, blockNotes, bookingInfo } = req.body;
+  const before = site.toObject();
 
   if (!['available', 'booked', 'blocked'].includes(mediaStatus)) {
     res.status(400);
@@ -121,22 +210,66 @@ const changeStatus = asyncHandler(async (req, res) => {
       blockedDate: nowIST(),
       blockedBy: req.user._id,
     };
-    site.bookingInfo = undefined;
   } else if (mediaStatus === 'booked') {
-    if (!bookingInfo || !bookingInfo.client) {
+    try {
+      site.bookingInfo = buildBookingInfo(site, bookingInfo, req.user._id);
+    } catch (err) {
       res.status(400);
-      throw new Error('Booking information with client is required');
+      throw err;
     }
-    site.bookingInfo = { ...bookingInfo, bookedBy: req.user._id };
-    site.blockInfo = undefined;
-  } else {
-    site.bookingInfo = undefined;
-    site.blockInfo = undefined;
   }
 
   site.mediaStatus = mediaStatus;
+  site.isActive = mediaStatus !== 'blocked';
+  site.$locals.inventoryOnly = true;
   await site.save();
-  res.json(site);
+  await logFieldChanges(site._id, before, site.toObject(), req.user._id);
+  res.json({ ...site.toObject(), mediaCode: site.mediaId });
+});
+
+const bulkChangeStatus = asyncHandler(async (req, res) => {
+  const { siteIds, mediaStatus, blockReason, blockNotes, bookingInfo } = req.body;
+  if (!Array.isArray(siteIds) || siteIds.length === 0) {
+    res.status(400);
+    throw new Error('No sites selected');
+  }
+  if (!['available', 'booked', 'blocked'].includes(mediaStatus)) {
+    res.status(400);
+    throw new Error('Invalid media status');
+  }
+  if (mediaStatus === 'blocked' && !blockReason) {
+    res.status(400);
+    throw new Error('Block reason is required');
+  }
+
+  const sites = await Site.find({ _id: { $in: siteIds } });
+  const results = [];
+  for (const site of sites) {
+    const before = site.toObject();
+    if (mediaStatus === 'blocked') {
+      site.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
+    } else if (mediaStatus === 'booked') {
+      try {
+        site.bookingInfo = buildBookingInfo(site, bookingInfo, req.user._id);
+      } catch (err) {
+        continue;
+      }
+    }
+    site.mediaStatus = mediaStatus;
+    site.isActive = mediaStatus !== 'blocked';
+    site.$locals.inventoryOnly = true;
+    await site.save();
+    await logFieldChanges(site._id, before, site.toObject(), req.user._id);
+    results.push(site._id);
+  }
+  res.json({ updated: results.length, total: siteIds.length });
+});
+
+const getSiteHistory = asyncHandler(async (req, res) => {
+  const history = await SiteHistory.find({ site: req.params.id })
+    .sort({ changedAt: -1 })
+    .populate('changedBy', 'name');
+  res.json(history);
 });
 
 const bulkImport = asyncHandler(async (req, res) => {
@@ -145,9 +278,96 @@ const bulkImport = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error('No records to import');
   }
-  const docs = records.map((r) => ({ ...r, mediaStatus: r.mediaStatus || 'available', createdBy: req.user._id }));
+  const docs = records.map((r) => ({
+    ...normalizeSiteBody(r),
+    mediaStatus: r.mediaStatus || 'available',
+    createdBy: req.user._id,
+  }));
   const created = await Site.insertMany(docs, { ordered: false });
   res.status(201).json({ imported: created.length });
+});
+
+const getSummary = asyncHandler(async (req, res) => {
+  const filter = buildFilter(req.query);
+  const [total, available, booked, blocked] = await Promise.all([
+    Site.countDocuments(filter),
+    Site.countDocuments({ ...filter, mediaStatus: 'available' }),
+    Site.countDocuments({ ...filter, mediaStatus: 'booked' }),
+    Site.countDocuments({ ...filter, mediaStatus: 'blocked' }),
+  ]);
+  res.json({ total, available, booked, blocked });
+});
+
+const exportSites = asyncHandler(async (req, res) => {
+  const filter = buildFilter(req.query);
+  const sites = await Site.find(filter).sort({ createdAt: -1 });
+
+  const rows = sites.map((s) => ({
+    MediaCode: s.mediaId,
+    'Media Type': s.mediaType,
+    Quantity: s.quantity,
+    State: s.state,
+    City: s.city,
+    Location: s.location,
+    'Area Name': s.areaName,
+    Latitude: s.latitude,
+    Longitude: s.longitude,
+    Illumination: s.illumination,
+    Width: s.width,
+    Height: s.height,
+    'Auto Size': s.autoSize,
+    'Display Cost Per Month': s.monthlyAmount,
+    'Printing Cost': s.printingCost,
+    'Mounting Cost': s.mountingCost,
+    'Total Cost': s.totalCost,
+    'Media Status': s.mediaStatus,
+    'Active Status': s.isActive ? 'Active' : 'Inactive',
+    'Inventory Updated On': s.inventoryUpdatedAt,
+    'Last Updated On': s.updatedAt,
+  }));
+
+  const now = nowIST();
+  const pad = (n) => String(n).padStart(2, '0');
+  const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const timeStr = `${pad(now.getHours())}-${pad(now.getMinutes())}`;
+
+  const metaRows = [
+    ['Generated Date', dateStr],
+    ['Generated Time', `${pad(now.getHours())}:${pad(now.getMinutes())}`],
+    ['State Filter', req.query.state || 'All'],
+    ['City Filter', req.query.city || 'All'],
+    ['Media Status Filter', req.query.mediaStatus || 'All'],
+    ['Active Status Filter', req.query.isActive === '' || req.query.isActive === undefined ? 'All' : req.query.isActive === 'true' ? 'Active' : 'Inactive'],
+    ['Search Filter', req.query.search || 'None'],
+    [],
+  ];
+
+  const wb = XLSX.utils.book_new();
+  const metaSheet = XLSX.utils.aoa_to_sheet(metaRows);
+  XLSX.utils.book_append_sheet(wb, metaSheet, 'Summary');
+  const dataSheet = XLSX.utils.json_to_sheet(rows);
+  XLSX.utils.book_append_sheet(wb, dataSheet, 'Sites');
+
+  const stateSlug = req.query.state ? req.query.state.replace(/\s+/g, '') : null;
+  const citySlug = req.query.city ? req.query.city.replace(/\s+/g, '') : null;
+  const statusSlug = req.query.mediaStatus ? req.query.mediaStatus.replace(/\s+/g, '') : null;
+  const prefix = req.query.filenamePrefix === 'inventory' ? 'inventory' : 'sites';
+  const namePart = stateSlug || citySlug || statusSlug ? [stateSlug, citySlug, statusSlug].filter(Boolean).join('_') : 'all';
+  const filename = `${prefix}_${namePart}_${dateStr}_${timeStr}.xlsx`;
+
+  const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.send(buffer);
+});
+
+const uploadImage = asyncHandler(async (req, res) => {
+  if (!req.file) {
+    res.status(400);
+    throw new Error('No image file provided');
+  }
+  const url = await saveMediaImage(req.file);
+  res.json({ url });
 });
 
 module.exports = {
@@ -158,5 +378,10 @@ module.exports = {
   updateSite,
   deleteSite,
   changeStatus,
+  bulkChangeStatus,
   bulkImport,
+  uploadImage,
+  exportSites,
+  getSiteHistory,
+  getSummary,
 };

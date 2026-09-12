@@ -5,12 +5,17 @@ const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 
 const clientSchema = new mongoose.Schema(
   {
+    customerType: { type: String, enum: ['client', 'agency'], default: 'client' },
     name: { type: String, required: true, trim: true },
     phone: { type: String, trim: true },
     email: { type: String, trim: true, lowercase: true },
     location: { type: String, trim: true },
-    latitude: Number,
-    longitude: Number,
+    latitude: { type: Number, min: -90, max: 90 },
+    longitude: { type: Number, min: -180, max: 180 },
+    agencyComm: { type: Number, min: 0 },
+    gst: { type: String, trim: true },
+    vendorName: { type: String, trim: true },
+    vendorCost: { type: Number, min: 0 },
     notes: String,
     isActive: { type: Boolean, default: true },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

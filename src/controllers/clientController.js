@@ -36,7 +36,39 @@ const getClient = asyncHandler(async (req, res) => {
   res.json({ client, bookings, proposals, siteCount });
 });
 
+function validateClientPayload(body, { requireGeo = false } = {}) {
+  const errors = [];
+  const num = (v) => (v === '' || v === undefined || v === null ? undefined : Number(v));
+
+  if (!body.name || !String(body.name).trim()) {
+    errors.push(body.customerType === 'agency' ? 'Agency name is required' : 'Client name is required');
+  }
+  if (body.customerType && !['client', 'agency'].includes(body.customerType)) {
+    errors.push('Invalid customer type');
+  }
+  if (requireGeo && (body.latitude === undefined || body.latitude === '')) errors.push('Latitude is required');
+  if (requireGeo && (body.longitude === undefined || body.longitude === '')) errors.push('Longitude is required');
+  if (body.latitude !== undefined && body.latitude !== '' && (isNaN(num(body.latitude)) || num(body.latitude) < -90 || num(body.latitude) > 90)) {
+    errors.push('Latitude must be between -90 and 90');
+  }
+  if (body.longitude !== undefined && body.longitude !== '' && (isNaN(num(body.longitude)) || num(body.longitude) < -180 || num(body.longitude) > 180)) {
+    errors.push('Longitude must be between -180 and 180');
+  }
+  if (body.agencyComm !== undefined && body.agencyComm !== '' && (isNaN(num(body.agencyComm)) || num(body.agencyComm) < 0)) {
+    errors.push('Agency Comm must be a number greater than or equal to 0');
+  }
+  if (body.vendorCost !== undefined && body.vendorCost !== '' && (isNaN(num(body.vendorCost)) || num(body.vendorCost) < 0)) {
+    errors.push('Vendor Cost must be a number greater than or equal to 0');
+  }
+  return errors;
+}
+
 const createClient = asyncHandler(async (req, res) => {
+  const errors = validateClientPayload(req.body, { requireGeo: true });
+  if (errors.length) {
+    res.status(400);
+    throw new Error(errors.join('; '));
+  }
   const client = await Client.create({ ...req.body, createdBy: req.user._id });
   res.status(201).json(client);
 });
@@ -46,6 +78,11 @@ const updateClient = asyncHandler(async (req, res) => {
   if (!client) {
     res.status(404);
     throw new Error('Client not found');
+  }
+  const errors = validateClientPayload({ ...client.toObject(), ...req.body });
+  if (errors.length) {
+    res.status(400);
+    throw new Error(errors.join('; '));
   }
   Object.assign(client, req.body);
   await client.save();
