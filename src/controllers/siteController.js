@@ -1,6 +1,9 @@
 const asyncHandler = require('express-async-handler');
 const Site = require('../models/Site');
 
+const IST_OFFSET_MS = 330 * 60000;
+const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
+
 const buildFilter = (query) => {
   const filter = {};
   if (query.search) {
@@ -94,7 +97,6 @@ const deleteSite = asyncHandler(async (req, res) => {
   res.json({ message: 'Site deleted' });
 });
 
-// Explicit status-change endpoint enforcing the Available/Booked/Blocked rules.
 const changeStatus = asyncHandler(async (req, res) => {
   const site = await Site.findById(req.params.id);
   if (!site) {
@@ -116,7 +118,7 @@ const changeStatus = asyncHandler(async (req, res) => {
     site.blockInfo = {
       reason: blockReason,
       notes: blockNotes,
-      blockedDate: new Date(),
+      blockedDate: nowIST(),
       blockedBy: req.user._id,
     };
     site.bookingInfo = undefined;
@@ -138,7 +140,7 @@ const changeStatus = asyncHandler(async (req, res) => {
 });
 
 const bulkImport = asyncHandler(async (req, res) => {
-  const { records } = req.body; // pre-validated on the client/upload step
+  const { records } = req.body;
   if (!Array.isArray(records) || records.length === 0) {
     res.status(400);
     throw new Error('No records to import');

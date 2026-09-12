@@ -1,5 +1,8 @@
 const mongoose = require('mongoose');
 
+const IST_OFFSET_MS = 330 * 60000;
+const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
+
 const clientSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
@@ -11,9 +14,23 @@ const clientSchema = new mongoose.Schema(
     notes: String,
     isActive: { type: Boolean, default: true },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: { type: Date, default: nowIST },
+    updatedAt: { type: Date, default: nowIST },
   },
-  { timestamps: true }
+  { timestamps: false }
 );
+
+clientSchema.pre('save', function (next) {
+  const now = nowIST();
+  if (!this.createdAt) this.createdAt = now;
+  this.updatedAt = now;
+  next();
+});
+
+clientSchema.pre(['updateOne', 'findOneAndUpdate', 'updateMany'], function (next) {
+  this.set({ updatedAt: nowIST() });
+  next();
+});
 
 clientSchema.index({ name: 'text', phone: 'text', email: 'text' });
 

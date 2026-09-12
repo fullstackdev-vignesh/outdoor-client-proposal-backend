@@ -9,6 +9,7 @@ const getDashboardStats = asyncHandler(async (req, res) => {
   const [
     totalUsers,
     totalTLs,
+    totalBDs,
     totalSites,
     activeSites,
     inactiveSites,
@@ -26,6 +27,7 @@ const getDashboardStats = asyncHandler(async (req, res) => {
   ] = await Promise.all([
     User.countDocuments({ role: 'user' }),
     User.countDocuments({ role: 'tl' }),
+    User.countDocuments({ role: 'bd' }),
     Site.countDocuments(),
     Site.countDocuments({ isActive: true }),
     Site.countDocuments({ isActive: false }),
@@ -46,6 +48,7 @@ const getDashboardStats = asyncHandler(async (req, res) => {
     cards: {
       totalUsers,
       totalTLs,
+      totalBDs,
       totalSites,
       activeSites,
       inactiveSites,

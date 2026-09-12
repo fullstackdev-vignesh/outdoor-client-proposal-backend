@@ -4,7 +4,7 @@ const { getUsers, getUser, createUser, updateUser, deleteUser } = require('../co
 
 const router = express.Router();
 
-router.use(protect, authorize('admin'));
+router.use(protect, authorize('admin', 'tl'));
 
 router.get('/', getUsers);
 router.get('/:id', getUser);

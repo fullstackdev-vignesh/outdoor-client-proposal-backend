@@ -22,6 +22,7 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
 app.use('/generated', express.static(path.join(__dirname, '..', 'generated')));
 
+app.use('/admin', authRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/sites', siteRoutes);
