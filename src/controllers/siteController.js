@@ -4,6 +4,7 @@ const Site = require('../models/Site');
 const SiteHistory = require('../models/SiteHistory');
 const { saveMediaImage } = require('../utils/imageStorage');
 const { calcDurationDays, calcBookingAmount } = require('../utils/bookingCalc');
+const { formatIST } = require('../utils/formatDate');
 
 const IST_OFFSET_MS = 330 * 60000;
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
@@ -130,7 +131,16 @@ const createSite = asyncHandler(async (req, res) => {
   }
   payload.createdBy = req.user._id;
   if (!payload.mediaStatus) payload.mediaStatus = 'available';
-  const site = await Site.create(payload);
+  let site;
+  try {
+    site = await Site.create(payload);
+  } catch (err) {
+    if (err.code === 11000 && err.keyPattern?.mediaId) {
+      res.status(400);
+      throw new Error('MediaCode already exists. Please use a different MediaCode.');
+    }
+    throw err;
+  }
   res.status(201).json({ ...site.toObject(), mediaCode: site.mediaId });
 });
 
@@ -148,7 +158,15 @@ const updateSite = asyncHandler(async (req, res) => {
   }
   const before = site.toObject();
   Object.assign(site, payload);
-  await site.save();
+  try {
+    await site.save();
+  } catch (err) {
+    if (err.code === 11000 && err.keyPattern?.mediaId) {
+      res.status(400);
+      throw new Error('MediaCode already exists. Please use a different MediaCode.');
+    }
+    throw err;
+  }
   await logFieldChanges(site._id, before, site.toObject(), req.user._id);
   res.json({ ...site.toObject(), mediaCode: site.mediaId });
 });
@@ -322,18 +340,17 @@ const exportSites = asyncHandler(async (req, res) => {
     'Total Cost': s.totalCost,
     'Media Status': s.mediaStatus,
     'Active Status': s.isActive ? 'Active' : 'Inactive',
-    'Inventory Updated On': s.inventoryUpdatedAt,
-    'Last Updated On': s.updatedAt,
+    'Inventory Updated On': formatIST(s.inventoryUpdatedAt),
+    'Last Updated On': formatIST(s.updatedAt),
   }));
 
   const now = nowIST();
   const pad = (n) => String(n).padStart(2, '0');
-  const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-  const timeStr = `${pad(now.getHours())}-${pad(now.getMinutes())}`;
+  const dateStr = `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())}`;
+  const timeStr = `${pad(now.getUTCHours())}-${pad(now.getUTCMinutes())}`;
 
   const metaRows = [
-    ['Generated Date', dateStr],
-    ['Generated Time', `${pad(now.getHours())}:${pad(now.getMinutes())}`],
+    ['Generated On', formatIST(now)],
     ['State Filter', req.query.state || 'All'],
     ['City Filter', req.query.city || 'All'],
     ['Media Status Filter', req.query.mediaStatus || 'All'],
@@ -344,8 +361,11 @@ const exportSites = asyncHandler(async (req, res) => {
 
   const wb = XLSX.utils.book_new();
   const metaSheet = XLSX.utils.aoa_to_sheet(metaRows);
+  metaSheet['!cols'] = [{ wch: 20 }, { wch: 28 }];
   XLSX.utils.book_append_sheet(wb, metaSheet, 'Summary');
   const dataSheet = XLSX.utils.json_to_sheet(rows);
+  const headers = rows.length ? Object.keys(rows[0]) : [];
+  dataSheet['!cols'] = headers.map((h) => ({ wch: Math.max(h.length + 4, h.includes('On') ? 20 : 12) }));
   XLSX.utils.book_append_sheet(wb, dataSheet, 'Sites');
 
   const stateSlug = req.query.state ? req.query.state.replace(/\s+/g, '') : null;
