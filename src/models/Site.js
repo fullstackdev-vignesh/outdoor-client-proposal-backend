@@ -101,4 +101,6 @@ siteSchema.pre(['updateOne', 'findOneAndUpdate', 'updateMany'], function (next) 
 
 siteSchema.index({ mediaId: 'text', location: 'text', city: 'text', state: 'text', areaName: 'text' });
 
-module.exports = mongoose.model('Site', siteSchema);
+const Site = mongoose.model('Site', siteSchema);
+Site.applyComputedFields = applyComputedFields;
+module.exports = Site;

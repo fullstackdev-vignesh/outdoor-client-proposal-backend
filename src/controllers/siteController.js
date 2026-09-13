@@ -296,11 +296,15 @@ const bulkImport = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error('No records to import');
   }
-  const docs = records.map((r) => ({
-    ...normalizeSiteBody(r),
-    mediaStatus: r.mediaStatus || 'available',
-    createdBy: req.user._id,
-  }));
+  const docs = records.map((r) => {
+    const doc = {
+      ...normalizeSiteBody(r),
+      mediaStatus: r.mediaStatus || 'available',
+      createdBy: req.user._id,
+    };
+    Site.applyComputedFields(doc);
+    return doc;
+  });
   const created = await Site.insertMany(docs, { ordered: false });
   res.status(201).json({ imported: created.length });
 });
