@@ -1,5 +1,5 @@
 const asyncHandler = require('express-async-handler');
-const XLSX = require('xlsx');
+const ExcelJS = require('exceljs');
 const Site = require('../models/Site');
 const SiteHistory = require('../models/SiteHistory');
 const { saveMediaImage } = require('../utils/imageStorage');
@@ -131,6 +131,33 @@ const createSite = asyncHandler(async (req, res) => {
   }
   payload.createdBy = req.user._id;
   if (!payload.mediaStatus) payload.mediaStatus = 'available';
+
+  const { blockReason, blockNotes, bookingInfo } = payload;
+  delete payload.blockReason;
+  delete payload.blockNotes;
+  delete payload.bookingInfo;
+
+  Site.applyComputedFields(payload);
+
+  if (payload.mediaStatus === 'blocked') {
+    if (!blockReason) {
+      res.status(400);
+      throw new Error('Block reason is required');
+    }
+    payload.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
+    payload.isActive = false;
+  } else if (payload.mediaStatus === 'booked') {
+    try {
+      payload.bookingInfo = buildBookingInfo(payload, bookingInfo, req.user._id);
+    } catch (err) {
+      res.status(400);
+      throw err;
+    }
+    payload.isActive = true;
+  } else {
+    payload.isActive = true;
+  }
+
   let site;
   try {
     site = await Site.create(payload);
@@ -157,7 +184,30 @@ const updateSite = asyncHandler(async (req, res) => {
     throw new Error(errors.join('; '));
   }
   const before = site.toObject();
-  Object.assign(site, payload);
+
+  const { blockReason, blockNotes, bookingInfo, ...siteFields } = payload;
+  Object.assign(site, siteFields);
+  Site.applyComputedFields(site);
+
+  if (site.mediaStatus === 'blocked') {
+    if (!blockReason) {
+      res.status(400);
+      throw new Error('Block reason is required');
+    }
+    site.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
+    site.isActive = false;
+  } else if (site.mediaStatus === 'booked') {
+    try {
+      site.bookingInfo = buildBookingInfo(site, bookingInfo, req.user._id);
+    } catch (err) {
+      res.status(400);
+      throw err;
+    }
+    site.isActive = true;
+  } else {
+    site.isActive = true;
+  }
+
   try {
     await site.save();
   } catch (err) {
@@ -209,7 +259,7 @@ const changeStatus = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error('Site not found');
   }
-  const { mediaStatus, blockReason, blockNotes, bookingInfo } = req.body;
+  const { mediaStatus, blockReason, blockNotes, bookingInfo, source } = req.body;
   const before = site.toObject();
 
   if (!['available', 'booked', 'blocked'].includes(mediaStatus)) {
@@ -239,7 +289,9 @@ const changeStatus = asyncHandler(async (req, res) => {
 
   site.mediaStatus = mediaStatus;
   site.isActive = mediaStatus !== 'blocked';
-  site.$locals.inventoryOnly = true;
+  // Status changes made from /sites bump siteUpdatedAt (updatedAt); changes made from
+  // /inventory bump inventoryUpdatedAt only. Status itself always syncs on both pages.
+  site.$locals.inventoryOnly = source === 'inventory';
   await site.save();
   await logFieldChanges(site._id, before, site.toObject(), req.user._id);
   res.json({ ...site.toObject(), mediaCode: site.mediaId });
@@ -320,57 +372,119 @@ const getSummary = asyncHandler(async (req, res) => {
   res.json({ total, available, booked, blocked });
 });
 
+const SITE_EXPORT_COLUMNS = [
+  { header: 'MediaCode', key: 'mediaCode', width: 16 },
+  { header: 'Media Type', key: 'mediaType', width: 16 },
+  { header: 'Quantity', key: 'quantity', width: 10, numeric: true },
+  { header: 'State', key: 'state', width: 16 },
+  { header: 'City', key: 'city', width: 14 },
+  { header: 'Location', key: 'location', width: 24, wrap: true },
+  { header: 'Area Name', key: 'areaName', width: 16 },
+  { header: 'Latitude', key: 'latitude', width: 12, numeric: true },
+  { header: 'Longitude', key: 'longitude', width: 12, numeric: true },
+  { header: 'Illumination', key: 'illumination', width: 14 },
+  { header: 'Width', key: 'width', width: 9, numeric: true },
+  { header: 'Height', key: 'height', width: 9, numeric: true },
+  { header: 'Auto Size', key: 'autoSize', width: 11, numeric: true },
+  { header: 'Display Cost Per Month', key: 'monthlyAmount', width: 20, numeric: true },
+  { header: 'Printing Cost', key: 'printingCost', width: 14, numeric: true },
+  { header: 'Mounting Cost', key: 'mountingCost', width: 14, numeric: true },
+  { header: 'Total Cost', key: 'totalCost', width: 14, numeric: true },
+  { header: 'Media Status', key: 'mediaStatus', width: 14 },
+  { header: 'Active Status', key: 'activeStatus', width: 14 },
+  { header: 'MediaImage', key: 'mediaImage', width: 40, wrap: true },
+  { header: 'Inventory Updated On', key: 'inventoryUpdatedOn', width: 22 },
+  { header: 'Last Updated On', key: 'lastUpdatedOn', width: 22 },
+];
+
+const HEADER_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCE6F1' } };
+const THIN_BORDER = { style: 'thin', color: { argb: 'FFB8C2CC' } };
+const ALL_BORDERS = { top: THIN_BORDER, left: THIN_BORDER, bottom: THIN_BORDER, right: THIN_BORDER };
+
 const exportSites = asyncHandler(async (req, res) => {
   const filter = buildFilter(req.query);
   const sites = await Site.find(filter).sort({ createdAt: -1 });
-
-  const rows = sites.map((s) => ({
-    MediaCode: s.mediaId,
-    'Media Type': s.mediaType,
-    Quantity: s.quantity,
-    State: s.state,
-    City: s.city,
-    Location: s.location,
-    'Area Name': s.areaName,
-    Latitude: s.latitude,
-    Longitude: s.longitude,
-    Illumination: s.illumination,
-    Width: s.width,
-    Height: s.height,
-    'Auto Size': s.autoSize,
-    'Display Cost Per Month': s.monthlyAmount,
-    'Printing Cost': s.printingCost,
-    'Mounting Cost': s.mountingCost,
-    'Total Cost': s.totalCost,
-    'Media Status': s.mediaStatus,
-    'Active Status': s.isActive ? 'Active' : 'Inactive',
-    'Inventory Updated On': formatIST(s.inventoryUpdatedAt),
-    'Last Updated On': formatIST(s.updatedAt),
-  }));
 
   const now = nowIST();
   const pad = (n) => String(n).padStart(2, '0');
   const dateStr = `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())}`;
   const timeStr = `${pad(now.getUTCHours())}-${pad(now.getUTCMinutes())}`;
 
-  const metaRows = [
+  const activeStatusFilterLabel =
+    req.query.isActive === '' || req.query.isActive === undefined ? 'All' : req.query.isActive === 'true' ? 'Active' : 'Inactive';
+
+  const wb = new ExcelJS.Workbook();
+
+  // --- Summary sheet ---
+  const summarySheet = wb.addWorksheet('Summary');
+  summarySheet.columns = [{ width: 22 }, { width: 32 }];
+  const summaryRows = [
     ['Generated On', formatIST(now)],
     ['State Filter', req.query.state || 'All'],
     ['City Filter', req.query.city || 'All'],
     ['Media Status Filter', req.query.mediaStatus || 'All'],
-    ['Active Status Filter', req.query.isActive === '' || req.query.isActive === undefined ? 'All' : req.query.isActive === 'true' ? 'Active' : 'Inactive'],
+    ['Active Status Filter', activeStatusFilterLabel],
     ['Search Filter', req.query.search || 'None'],
-    [],
   ];
+  summaryRows.forEach(([label, value]) => {
+    const row = summarySheet.addRow([label, value]);
+    const labelCell = row.getCell(1);
+    const valueCell = row.getCell(2);
+    labelCell.font = { bold: true, color: { argb: 'FF1F2937' } };
+    labelCell.fill = HEADER_FILL;
+    labelCell.border = ALL_BORDERS;
+    valueCell.font = { color: { argb: 'FF1F2937' } };
+    valueCell.border = ALL_BORDERS;
+    valueCell.alignment = { vertical: 'middle' };
+  });
 
-  const wb = XLSX.utils.book_new();
-  const metaSheet = XLSX.utils.aoa_to_sheet(metaRows);
-  metaSheet['!cols'] = [{ wch: 20 }, { wch: 28 }];
-  XLSX.utils.book_append_sheet(wb, metaSheet, 'Summary');
-  const dataSheet = XLSX.utils.json_to_sheet(rows);
-  const headers = rows.length ? Object.keys(rows[0]) : [];
-  dataSheet['!cols'] = headers.map((h) => ({ wch: Math.max(h.length + 4, h.includes('On') ? 20 : 12) }));
-  XLSX.utils.book_append_sheet(wb, dataSheet, 'Sites');
+  // --- Sites sheet ---
+  const dataSheet = wb.addWorksheet('Sites');
+  dataSheet.columns = SITE_EXPORT_COLUMNS.map((c) => ({ header: c.header, key: c.key, width: c.width }));
+
+  const headerRow = dataSheet.getRow(1);
+  headerRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FF1F2937' } };
+    cell.fill = HEADER_FILL;
+    cell.border = ALL_BORDERS;
+    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+  });
+  headerRow.height = 20;
+  dataSheet.views = [{ state: 'frozen', ySplit: 1 }];
+
+  sites.forEach((s) => {
+    const row = dataSheet.addRow({
+      mediaCode: s.mediaId,
+      mediaType: s.mediaType,
+      quantity: s.quantity,
+      state: s.state,
+      city: s.city,
+      location: s.location,
+      areaName: s.areaName,
+      latitude: s.latitude,
+      longitude: s.longitude,
+      illumination: s.illumination,
+      width: s.width,
+      height: s.height,
+      autoSize: s.autoSize,
+      monthlyAmount: s.monthlyAmount,
+      printingCost: s.printingCost,
+      mountingCost: s.mountingCost,
+      totalCost: s.totalCost,
+      mediaStatus: s.mediaStatus,
+      activeStatus: s.isActive ? 'Active' : 'Inactive',
+      mediaImage: s.image || 'N/A',
+      inventoryUpdatedOn: formatIST(s.inventoryUpdatedAt),
+      lastUpdatedOn: formatIST(s.updatedAt),
+    });
+    row.eachCell((cell, colNumber) => {
+      const col = SITE_EXPORT_COLUMNS[colNumber - 1];
+      cell.border = ALL_BORDERS;
+      if (col?.numeric) cell.alignment = { horizontal: 'right', vertical: 'middle' };
+      else if (col?.wrap) cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+      else cell.alignment = { horizontal: 'left', vertical: 'middle' };
+    });
+  });
 
   const stateSlug = req.query.state ? req.query.state.replace(/\s+/g, '') : null;
   const citySlug = req.query.city ? req.query.city.replace(/\s+/g, '') : null;
@@ -379,10 +493,10 @@ const exportSites = asyncHandler(async (req, res) => {
   const namePart = stateSlug || citySlug || statusSlug ? [stateSlug, citySlug, statusSlug].filter(Boolean).join('_') : 'all';
   const filename = `${prefix}_${namePart}_${dateStr}_${timeStr}.xlsx`;
 
-  const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  const buffer = await wb.xlsx.writeBuffer();
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.send(buffer);
+  res.send(Buffer.from(buffer));
 });
 
 const uploadImage = asyncHandler(async (req, res) => {
