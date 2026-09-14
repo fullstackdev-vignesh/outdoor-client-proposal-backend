@@ -5,6 +5,8 @@ const SiteHistory = require('../models/SiteHistory');
 const { saveMediaImage } = require('../utils/imageStorage');
 const { calcDurationDays, calcBookingAmount } = require('../utils/bookingCalc');
 const { formatIST } = require('../utils/formatDate');
+const InventoryHistory = require('../models/InventoryHistory');
+const { recordStatusPeriod, buildOverlapFilter } = require('../services/inventoryTimeline');
 
 const IST_OFFSET_MS = 330 * 60000;
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
@@ -168,6 +170,7 @@ const createSite = asyncHandler(async (req, res) => {
     }
     throw err;
   }
+  await recordStatusPeriod({ site, previousStatus: null, source: 'sites', userId: req.user._id });
   res.status(201).json({ ...site.toObject(), mediaCode: site.mediaId });
 });
 
@@ -216,6 +219,9 @@ const updateSite = asyncHandler(async (req, res) => {
       throw new Error('MediaCode already exists. Please use a different MediaCode.');
     }
     throw err;
+  }
+  if (before.mediaStatus !== site.mediaStatus) {
+    await recordStatusPeriod({ site, previousStatus: before.mediaStatus, source: 'sites', userId: req.user._id });
   }
   await logFieldChanges(site._id, before, site.toObject(), req.user._id);
   res.json({ ...site.toObject(), mediaCode: site.mediaId });
@@ -287,12 +293,15 @@ const changeStatus = asyncHandler(async (req, res) => {
     }
   }
 
+  const previousStatus = site.mediaStatus;
   site.mediaStatus = mediaStatus;
   site.isActive = mediaStatus !== 'blocked';
   // Status changes made from /sites bump siteUpdatedAt (updatedAt); changes made from
   // /inventory bump inventoryUpdatedAt only. Status itself always syncs on both pages.
-  site.$locals.inventoryOnly = source === 'inventory';
+  const resolvedSource = source === 'inventory' ? 'inventory' : 'sites';
+  site.$locals.inventoryOnly = resolvedSource === 'inventory';
   await site.save();
+  await recordStatusPeriod({ site, previousStatus, source: resolvedSource, userId: req.user._id });
   await logFieldChanges(site._id, before, site.toObject(), req.user._id);
   res.json({ ...site.toObject(), mediaCode: site.mediaId });
 });
@@ -316,6 +325,7 @@ const bulkChangeStatus = asyncHandler(async (req, res) => {
   const results = [];
   for (const site of sites) {
     const before = site.toObject();
+    const previousStatus = site.mediaStatus;
     if (mediaStatus === 'blocked') {
       site.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
     } else if (mediaStatus === 'booked') {
@@ -329,6 +339,7 @@ const bulkChangeStatus = asyncHandler(async (req, res) => {
     site.isActive = mediaStatus !== 'blocked';
     site.$locals.inventoryOnly = true;
     await site.save();
+    await recordStatusPeriod({ site, previousStatus, source: 'inventory', userId: req.user._id });
     await logFieldChanges(site._id, before, site.toObject(), req.user._id);
     results.push(site._id);
   }
@@ -340,6 +351,49 @@ const getSiteHistory = asyncHandler(async (req, res) => {
     .sort({ changedAt: -1 })
     .populate('changedBy', 'name');
   res.json(history);
+});
+
+const getSiteTimeline = asyncHandler(async (req, res) => {
+  const timeline = await InventoryHistory.find({ site: req.params.id })
+    .sort({ effectiveFrom: 1 })
+    .populate('changedBy', 'name');
+  res.json(timeline);
+});
+
+const getTimeline = asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(100, Number(req.query.limit) || 20);
+  const filter = buildOverlapFilter(req.query);
+
+  const [items, total, distinctSites] = await Promise.all([
+    InventoryHistory.find(filter)
+      .sort({ effectiveFrom: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .populate('changedBy', 'name'),
+    InventoryHistory.countDocuments(filter),
+    InventoryHistory.distinct('site', filter),
+  ]);
+
+  res.json({ items, total, distinctSiteCount: distinctSites.length, page, pages: Math.ceil(total / limit) });
+});
+
+const getTimelineSummary = asyncHandler(async (req, res) => {
+  const baseFilter = buildOverlapFilter({ ...req.query, mediaStatus: undefined });
+
+  const distinctByStatus = async (status) => {
+    const ids = await InventoryHistory.distinct('site', { ...baseFilter, status });
+    return ids.length;
+  };
+
+  const [totalIds, available, booked, blocked] = await Promise.all([
+    InventoryHistory.distinct('site', baseFilter),
+    distinctByStatus('available'),
+    distinctByStatus('booked'),
+    distinctByStatus('blocked'),
+  ]);
+
+  res.json({ total: totalIds.length, available, booked, blocked });
 });
 
 const bulkImport = asyncHandler(async (req, res) => {
@@ -499,6 +553,127 @@ const exportSites = asyncHandler(async (req, res) => {
   res.send(Buffer.from(buffer));
 });
 
+const TIMELINE_EXPORT_COLUMNS = [
+  { header: 'S.No', key: 'sno', width: 8, numeric: true },
+  { header: 'MediaCode', key: 'mediaCode', width: 16 },
+  { header: 'Media Image', key: 'mediaImage', width: 40, wrap: true },
+  { header: 'Media Type', key: 'mediaType', width: 16 },
+  { header: 'State', key: 'state', width: 16 },
+  { header: 'City', key: 'city', width: 14 },
+  { header: 'Status', key: 'status', width: 12 },
+  { header: 'Effective From', key: 'effectiveFrom', width: 20 },
+  { header: 'Effective To', key: 'effectiveTo', width: 20 },
+  { header: 'Duration', key: 'duration', width: 12 },
+  { header: 'Customer Type', key: 'customerType', width: 14 },
+  { header: 'Customer Name', key: 'customerName', width: 20 },
+  { header: 'Monthly Cost', key: 'monthlyCost', width: 14, numeric: true },
+  { header: 'Booking Amount', key: 'bookingAmount', width: 14, numeric: true },
+  { header: 'Block Reason', key: 'blockReason', width: 20, wrap: true },
+  { header: 'Block Notes', key: 'blockNotes', width: 24, wrap: true },
+  { header: 'Changed On', key: 'changedOn', width: 22 },
+  { header: 'Changed By', key: 'changedBy', width: 18 },
+  { header: 'Source', key: 'source', width: 12 },
+];
+
+const exportTimeline = asyncHandler(async (req, res) => {
+  const filter = buildOverlapFilter(req.query);
+  const [records, distinctSites] = await Promise.all([
+    InventoryHistory.find(filter).sort({ effectiveFrom: -1 }).populate('changedBy', 'name'),
+    InventoryHistory.distinct('site', filter),
+  ]);
+
+  const now = nowIST();
+  const pad = (n) => String(n).padStart(2, '0');
+  const dateStr = `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())}`;
+  const timeStr = `${pad(now.getUTCHours())}-${pad(now.getUTCMinutes())}`;
+
+  const activeStatusFilterLabel =
+    req.query.isActive === '' || req.query.isActive === undefined ? 'All' : req.query.isActive === 'true' ? 'Active' : 'Inactive';
+
+  const wb = new ExcelJS.Workbook();
+
+  const summarySheet = wb.addWorksheet('Summary');
+  summarySheet.columns = [{ width: 24 }, { width: 32 }];
+  const summaryRows = [
+    ['Generated On', formatIST(now)],
+    ['From Date', req.query.from ? formatIST(req.query.from) : 'All'],
+    ['To Date', req.query.to ? formatIST(req.query.to) : 'All'],
+    ['State Filter', req.query.state || 'All'],
+    ['City Filter', req.query.city || 'All'],
+    ['Status Filter', req.query.mediaStatus || 'All'],
+    ['Active Status Filter', activeStatusFilterLabel],
+    ['Search Filter', req.query.search || 'None'],
+    ['Total Matching History Records', records.length],
+    ['Distinct Sites', distinctSites.length],
+  ];
+  summaryRows.forEach(([label, value]) => {
+    const row = summarySheet.addRow([label, value]);
+    row.getCell(1).font = { bold: true, color: { argb: 'FF1F2937' } };
+    row.getCell(1).fill = HEADER_FILL;
+    row.getCell(1).border = ALL_BORDERS;
+    row.getCell(2).border = ALL_BORDERS;
+    row.getCell(2).alignment = { vertical: 'middle' };
+  });
+
+  const dataSheet = wb.addWorksheet('History');
+  dataSheet.columns = TIMELINE_EXPORT_COLUMNS.map((c) => ({ header: c.header, key: c.key, width: c.width }));
+  const headerRow = dataSheet.getRow(1);
+  headerRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FF1F2937' } };
+    cell.fill = HEADER_FILL;
+    cell.border = ALL_BORDERS;
+    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+  });
+  headerRow.height = 20;
+  dataSheet.views = [{ state: 'frozen', ySplit: 1 }];
+
+  records.forEach((h, idx) => {
+    const durationDays = h.status === 'booked' ? h.bookingSnapshot?.durationDays : null;
+    const row = dataSheet.addRow({
+      sno: idx + 1,
+      mediaCode: h.mediaId,
+      mediaImage: h.image || 'N/A',
+      mediaType: h.mediaType,
+      state: h.state,
+      city: h.city,
+      status: h.status,
+      effectiveFrom: formatIST(h.effectiveFrom),
+      effectiveTo: h.effectiveTo ? formatIST(h.effectiveTo) : 'Ongoing',
+      duration: durationDays ? `${durationDays} Days` : '-',
+      customerType: h.bookingSnapshot?.customerType || '-',
+      customerName: h.bookingSnapshot?.customerName || '-',
+      monthlyCost: h.bookingSnapshot?.monthlyTotalCost ?? '-',
+      bookingAmount: h.bookingSnapshot?.amount ?? '-',
+      blockReason: h.blockSnapshot?.reason || '-',
+      blockNotes: h.blockSnapshot?.notes || '-',
+      changedOn: formatIST(h.changedAt),
+      changedBy: h.changedBy?.name || '-',
+      source: h.source,
+    });
+    row.eachCell((cell, colNumber) => {
+      const col = TIMELINE_EXPORT_COLUMNS[colNumber - 1];
+      cell.border = ALL_BORDERS;
+      if (col?.numeric) cell.alignment = { horizontal: 'right', vertical: 'middle' };
+      else if (col?.wrap) cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+      else cell.alignment = { horizontal: 'left', vertical: 'middle' };
+    });
+  });
+
+  const stateSlug = req.query.state ? req.query.state.replace(/\s+/g, '') : null;
+  const citySlug = req.query.city ? req.query.city.replace(/\s+/g, '') : null;
+  const statusSlug = req.query.mediaStatus ? req.query.mediaStatus.replace(/\s+/g, '') : null;
+  const fromSlug = req.query.from ? formatIST(req.query.from).replace(/,.*/, '').replace(/\//g, '-') : null;
+  const toSlug = req.query.to ? formatIST(req.query.to).replace(/,.*/, '').replace(/\//g, '-') : null;
+  const locationPart = [stateSlug, citySlug, statusSlug].filter(Boolean).join('_');
+  const rangePart = fromSlug && toSlug ? `${fromSlug}_to_${toSlug}` : 'all';
+  const filename = `inventory_timeline_${locationPart ? locationPart + '_' : ''}${rangePart}.xlsx`;
+
+  const buffer = await wb.xlsx.writeBuffer();
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.send(Buffer.from(buffer));
+});
+
 const uploadImage = asyncHandler(async (req, res) => {
   if (!req.file) {
     res.status(400);
@@ -522,4 +697,8 @@ module.exports = {
   exportSites,
   getSiteHistory,
   getSummary,
+  getSiteTimeline,
+  getTimeline,
+  getTimelineSummary,
+  exportTimeline,
 };

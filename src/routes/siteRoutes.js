@@ -15,6 +15,10 @@ const {
   exportSites,
   getSiteHistory,
   getSummary,
+  getSiteTimeline,
+  getTimeline,
+  getTimelineSummary,
+  exportTimeline,
 } = require('../controllers/siteController');
 
 const router = express.Router();
@@ -24,8 +28,12 @@ router.use(protect);
 router.get('/available', getAvailableSites);
 router.get('/summary', getSummary);
 router.get('/export', exportSites);
+router.get('/timeline', getTimeline);
+router.get('/timeline/summary', getTimelineSummary);
+router.get('/timeline/export', exportTimeline);
 router.get('/', getSites);
 router.get('/:id/history', getSiteHistory);
+router.get('/:id/timeline', getSiteTimeline);
 router.get('/:id', getSite);
 router.post('/', authorize('admin', 'tl'), createSite);
 router.post('/upload-image', authorize('admin', 'tl'), upload.single('image'), uploadImage);
