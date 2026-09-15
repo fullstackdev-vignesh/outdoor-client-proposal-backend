@@ -23,7 +23,7 @@ async function run() {
       mediaType: site.mediaType,
       state: site.state,
       city: site.city,
-      image: site.image,
+      mediaImage: site.mediaImage,
       status: site.mediaStatus,
       previousStatus: null,
       isActive: site.isActive,

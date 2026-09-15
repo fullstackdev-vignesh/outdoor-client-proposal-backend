@@ -9,7 +9,8 @@ const inventoryHistorySchema = new mongoose.Schema({
   mediaType: String,
   state: String,
   city: String,
-  image: String,
+  mediaImage: String,
+  siteOwner: String,
 
   status: { type: String, enum: ['available', 'booked', 'blocked'], required: true, index: true },
   previousStatus: { type: String, enum: ['available', 'booked', 'blocked', null], default: null },

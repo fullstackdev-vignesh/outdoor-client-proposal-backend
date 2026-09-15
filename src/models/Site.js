@@ -40,6 +40,7 @@ const siteSchema = new mongoose.Schema(
     location: { type: String, trim: true },
     areaName: { type: String, trim: true },
     locationDetails: { type: String, trim: true },
+    siteOwner: { type: String, trim: true, index: true },
     latitude: { type: Number, min: -90, max: 90 },
     longitude: { type: Number, min: -180, max: 180 },
     illumination: { type: String, trim: true },
@@ -53,7 +54,7 @@ const siteSchema = new mongoose.Schema(
     printingCost: { type: Number, min: 0, default: 0 },
     mountingCost: { type: Number, min: 0, default: 0 },
     totalCost: { type: Number, min: 0 },
-    image: String,
+    mediaImage: String,
     isActive: { type: Boolean, default: true },
     mediaStatus: {
       type: String,

@@ -22,7 +22,8 @@ async function recordStatusPeriod({ site, previousStatus, source, userId }) {
     mediaType: site.mediaType,
     state: site.state,
     city: site.city,
-    image: site.image,
+    mediaImage: site.mediaImage,
+    siteOwner: site.siteOwner,
     status: newStatus,
     previousStatus: previousStatus || null,
     isActive: site.isActive,
@@ -66,6 +67,7 @@ function buildOverlapFilter(query) {
   const filter = {};
   if (query.state) filter.state = query.state;
   if (query.city) filter.city = query.city;
+  if (query.siteOwner) filter.siteOwner = query.siteOwner;
   if (query.mediaStatus) filter.status = query.mediaStatus;
   if (query.isActive !== undefined && query.isActive !== '') filter.isActive = query.isActive === 'true';
   if (query.search) {

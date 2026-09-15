@@ -15,6 +15,7 @@ const {
   exportSites,
   getSiteHistory,
   getSummary,
+  getSiteOwners,
   getSiteTimeline,
   getTimeline,
   getTimelineSummary,
@@ -27,6 +28,7 @@ router.use(protect);
 
 router.get('/available', getAvailableSites);
 router.get('/summary', getSummary);
+router.get('/owners', getSiteOwners);
 router.get('/export', exportSites);
 router.get('/timeline', getTimeline);
 router.get('/timeline/summary', getTimelineSummary);
@@ -35,11 +37,11 @@ router.get('/', getSites);
 router.get('/:id/history', getSiteHistory);
 router.get('/:id/timeline', getSiteTimeline);
 router.get('/:id', getSite);
-router.post('/', authorize('admin', 'tl'), createSite);
+router.post('/', authorize('admin', 'tl'), upload.single('mediaImage'), createSite);
 router.post('/upload-image', authorize('admin', 'tl'), upload.single('image'), uploadImage);
 router.post('/bulk-import', authorize('admin', 'tl'), bulkImport);
 router.patch('/bulk-status', authorize('admin', 'tl'), bulkChangeStatus);
-router.put('/:id', authorize('admin', 'tl'), updateSite);
+router.put('/:id', authorize('admin', 'tl'), upload.single('mediaImage'), updateSite);
 router.patch('/:id/status', authorize('admin', 'tl'), changeStatus);
 router.delete('/:id', authorize('admin', 'tl'), deleteSite);
 

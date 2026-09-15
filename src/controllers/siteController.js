@@ -12,9 +12,9 @@ const IST_OFFSET_MS = 330 * 60000;
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 
 const TRACKED_FIELDS = [
-  'mediaId', 'mediaType', 'quantity', 'state', 'city', 'location', 'areaName', 'locationDetails',
+  'mediaId', 'mediaType', 'quantity', 'state', 'city', 'location', 'areaName', 'locationDetails', 'siteOwner',
   'latitude', 'longitude', 'illumination', 'width', 'height', 'sizeUnit', 'amount', 'gstAmount',
-  'monthlyAmount', 'printingCost', 'mountingCost', 'totalCost', 'image', 'isActive', 'mediaStatus',
+  'monthlyAmount', 'printingCost', 'mountingCost', 'totalCost', 'mediaImage', 'isActive', 'mediaStatus',
 ];
 
 async function logFieldChanges(siteId, before, after, userId) {
@@ -47,6 +47,7 @@ const buildFilter = (query) => {
   if (query.state) filter.state = query.state;
   if (query.city) filter.city = query.city;
   if (query.mediaStatus) filter.mediaStatus = query.mediaStatus;
+  if (query.siteOwner) filter.siteOwner = query.siteOwner;
   if (query.isActive !== undefined && query.isActive !== '') filter.isActive = query.isActive === 'true';
   if (query.minPrice || query.maxPrice) {
     filter.monthlyAmount = {};
@@ -121,7 +122,27 @@ function normalizeSiteBody(body) {
   const payload = { ...body };
   if (payload.mediaCode && !payload.mediaId) payload.mediaId = payload.mediaCode;
   delete payload.mediaCode;
+  // multipart/form-data (used by Add/Edit Site so the image uploads in the same request)
+  // sends nested objects as a JSON string.
+  if (typeof payload.bookingInfo === 'string' && payload.bookingInfo) {
+    try {
+      payload.bookingInfo = JSON.parse(payload.bookingInfo);
+    } catch {
+      delete payload.bookingInfo;
+    }
+  }
   return payload;
+}
+
+// Uploads the newly selected image (if any) via the existing storage logic and sets
+// payload.mediaImage to its public URL. If no new file was sent, mediaImage is left
+// untouched so an update never clears/overwrites the site's existing image.
+async function applyUploadedImage(payload, req) {
+  if (req.file) {
+    payload.mediaImage = await saveMediaImage(req.file);
+  } else {
+    delete payload.mediaImage;
+  }
 }
 
 const createSite = asyncHandler(async (req, res) => {
@@ -131,8 +152,10 @@ const createSite = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error(errors.join('; '));
   }
+  await applyUploadedImage(payload, req);
   payload.createdBy = req.user._id;
   if (!payload.mediaStatus) payload.mediaStatus = 'available';
+  if (!payload.illumination) payload.illumination = 'Front Lit';
 
   const { blockReason, blockNotes, bookingInfo } = payload;
   delete payload.blockReason;
@@ -186,6 +209,7 @@ const updateSite = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error(errors.join('; '));
   }
+  await applyUploadedImage(payload, req);
   const before = site.toObject();
 
   const { blockReason, blockNotes, bookingInfo, ...siteFields } = payload;
@@ -415,6 +439,11 @@ const bulkImport = asyncHandler(async (req, res) => {
   res.status(201).json({ imported: created.length });
 });
 
+const getSiteOwners = asyncHandler(async (req, res) => {
+  const owners = await Site.distinct('siteOwner', { siteOwner: { $nin: [null, ''] } });
+  res.json(owners.sort((a, b) => a.localeCompare(b)));
+});
+
 const getSummary = asyncHandler(async (req, res) => {
   const filter = buildFilter(req.query);
   const [total, available, booked, blocked] = await Promise.all([
@@ -434,6 +463,7 @@ const SITE_EXPORT_COLUMNS = [
   { header: 'City', key: 'city', width: 14 },
   { header: 'Location', key: 'location', width: 24, wrap: true },
   { header: 'Area Name', key: 'areaName', width: 16 },
+  { header: 'Site Owner', key: 'siteOwner', width: 18 },
   { header: 'Latitude', key: 'latitude', width: 12, numeric: true },
   { header: 'Longitude', key: 'longitude', width: 12, numeric: true },
   { header: 'Illumination', key: 'illumination', width: 14 },
@@ -515,6 +545,7 @@ const exportSites = asyncHandler(async (req, res) => {
       city: s.city,
       location: s.location,
       areaName: s.areaName,
+      siteOwner: s.siteOwner,
       latitude: s.latitude,
       longitude: s.longitude,
       illumination: s.illumination,
@@ -527,7 +558,7 @@ const exportSites = asyncHandler(async (req, res) => {
       totalCost: s.totalCost,
       mediaStatus: s.mediaStatus,
       activeStatus: s.isActive ? 'Active' : 'Inactive',
-      mediaImage: s.image || 'N/A',
+      mediaImage: s.mediaImage || 'N/A',
       inventoryUpdatedOn: formatIST(s.inventoryUpdatedAt),
       lastUpdatedOn: formatIST(s.updatedAt),
     });
@@ -560,6 +591,7 @@ const TIMELINE_EXPORT_COLUMNS = [
   { header: 'Media Type', key: 'mediaType', width: 16 },
   { header: 'State', key: 'state', width: 16 },
   { header: 'City', key: 'city', width: 14 },
+  { header: 'Site Owner', key: 'siteOwner', width: 18 },
   { header: 'Status', key: 'status', width: 12 },
   { header: 'Effective From', key: 'effectiveFrom', width: 20 },
   { header: 'Effective To', key: 'effectiveTo', width: 20 },
@@ -632,10 +664,11 @@ const exportTimeline = asyncHandler(async (req, res) => {
     const row = dataSheet.addRow({
       sno: idx + 1,
       mediaCode: h.mediaId,
-      mediaImage: h.image || 'N/A',
+      mediaImage: h.mediaImage || 'N/A',
       mediaType: h.mediaType,
       state: h.state,
       city: h.city,
+      siteOwner: h.siteOwner || '-',
       status: h.status,
       effectiveFrom: formatIST(h.effectiveFrom),
       effectiveTo: h.effectiveTo ? formatIST(h.effectiveTo) : 'Ongoing',
@@ -697,6 +730,7 @@ module.exports = {
   exportSites,
   getSiteHistory,
   getSummary,
+  getSiteOwners,
   getSiteTimeline,
   getTimeline,
   getTimelineSummary,

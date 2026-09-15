@@ -44,7 +44,7 @@ async function generateProposalPpt(proposal) {
   const insertedBaseNames = [];
 
   for (const site of sites) {
-    const siteImage = localImage(site.image);
+    const siteImage = localImage(site.mediaImage);
     const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
     const specTextReplacements = [
       ['Chennai', site.city || '-'],
