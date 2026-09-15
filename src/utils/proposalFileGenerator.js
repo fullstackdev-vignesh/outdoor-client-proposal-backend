@@ -1,83 +1,124 @@
 const fs = require('fs');
 const path = require('path');
-const XLSX = require('xlsx');
-const PptxGenJS = require('pptxgenjs');
+const { PptxTemplate, SITE_SPEC_TEMPLATE, SITE_MAP_TEMPLATE, THANK_YOU_SLIDE, extOf } = require('./pptxTemplateEngine');
+const { generateExcelFromTemplate } = require('./excelTemplateEngine');
+const { getRouteMapBuffer } = require('./mapService');
 
 const GENERATED_DIR = path.join(__dirname, '..', '..', 'generated');
+const BACKEND_ROOT = path.join(__dirname, '..', '..');
 
 function ensureGeneratedDir() {
   fs.mkdirSync(GENERATED_DIR, { recursive: true });
   return GENERATED_DIR;
 }
 
+function localImage(image) {
+  if (!image || /^(https?:|data:|blob:)/.test(image)) return null;
+  const abs = path.join(BACKEND_ROOT, image.replace(/^\//, ''));
+  if (!fs.existsSync(abs)) return null;
+  return { buffer: fs.readFileSync(abs), ext: extOf(abs) || 'jpg' };
+}
+
+function customerLabel(proposal) {
+  const client = proposal.client || {};
+  return client.customerType === 'agency' ? `${client.name} (Agency)` : client.name || 'Customer';
+}
+
+function formatDisplayDate(date) {
+  return new Intl.DateTimeFormat('en-US', { day: '2-digit', month: 'short', year: 'numeric' }).format(date);
+}
+
 async function generateProposalPpt(proposal) {
   const dir = ensureGeneratedDir();
   const filePath = path.join(dir, `${proposal.proposalId}.pptx`);
 
-  const pptx = new PptxGenJS();
+  const tpl = await PptxTemplate.load();
+  const client = proposal.client || {};
+  const sites = proposal.sites || [];
 
-  const cover = pptx.addSlide();
-  cover.addText(`Proposal ${proposal.proposalId}`, { x: 0.5, y: 1, fontSize: 28, bold: true });
-  cover.addText(proposal.client?.name || '', { x: 0.5, y: 1.8, fontSize: 18 });
-  cover.addText(`Variant: ${proposal.variant || '-'}`, { x: 0.5, y: 2.4, fontSize: 14 });
+  await tpl.setCoverFields({
+    customerLabel: customerLabel(proposal),
+    dateLabel: formatDisplayDate(new Date()),
+  });
 
-  const summary = pptx.addSlide();
-  summary.addText('Summary', { x: 0.5, y: 0.3, fontSize: 22, bold: true });
-  summary.addText(
-    [
-      `Total Amount: ₹${proposal.totalAmount ?? '-'}`,
-      `GST Amount: ₹${proposal.gstAmount ?? '-'}`,
-      `Monthly Amount: ₹${proposal.monthlyAmount ?? '-'}`,
-      `Media Count: ${proposal.sites?.length ?? 0}`,
-    ].join('\n'),
-    { x: 0.5, y: 1, fontSize: 14, lineSpacing: 24 }
-  );
+  const insertedBaseNames = [];
 
-  const mediaSlide = pptx.addSlide();
-  mediaSlide.addText('Selected Media', { x: 0.5, y: 0.3, fontSize: 22, bold: true });
-  const rows = [
-    ['Media Name', 'Type', 'City', 'Status'],
-    ...(proposal.sites || []).map((s) => [s.mediaName, s.mediaType, s.city, s.mediaStatus]),
-  ];
-  mediaSlide.addTable(rows, { x: 0.5, y: 1, w: 9, fontSize: 10, autoPage: true });
+  for (const site of sites) {
+    const siteImage = localImage(site.image);
+    const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
+    const specTextReplacements = [
+      ['Chennai', site.city || '-'],
+      ['Hoarding', site.mediaType || '-'],
+      ['Frontlit', site.illumination || '-'],
+      ['40x30', sizeLabel || '-'],
+      ['1', String(site.quantity || 1)],
+      ['Periyanayakanpalayam bridge towards Mettupalayam 40x30', `${site.location || site.areaName || site.city} ${sizeLabel}`.trim()],
+    ];
 
-  await pptx.writeFile({ fileName: filePath });
+    const specBase = await tpl.cloneSlide(SITE_SPEC_TEMPLATE, {
+      textReplacements: specTextReplacements,
+      imageReplacements: siteImage ? [{ relId: 'rId2', buffer: siteImage.buffer, ext: siteImage.ext }] : [],
+    });
+    insertedBaseNames.push(specBase);
+
+    const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
+    if (hasCoords) {
+      const mapBuffer = await getRouteMapBuffer({
+        fromLat: client.latitude,
+        fromLng: client.longitude,
+        toLat: site.latitude,
+        toLng: site.longitude,
+      });
+      if (mapBuffer) {
+        const mapBase = await tpl.cloneSlide(SITE_MAP_TEMPLATE, {
+          textReplacements: [
+            ['Periyanayakanpalayam bridge towards Mettupalayam 40x30', `${site.location || site.areaName || site.city} ${sizeLabel}`.trim()],
+          ],
+          imageReplacements: [
+            ...(siteImage ? [{ relId: 'rId2', buffer: siteImage.buffer, ext: siteImage.ext }, { relId: 'rId6', buffer: siteImage.buffer, ext: siteImage.ext }] : []),
+            { relId: 'rId7', buffer: mapBuffer, ext: 'png' },
+          ],
+        });
+        insertedBaseNames.push(mapBase);
+      }
+    }
+  }
+
+  if (insertedBaseNames.length) {
+    await tpl.insertSlides(insertedBaseNames, 'slide3');
+  }
+  await tpl.removeFromSlideOrder(SITE_SPEC_TEMPLATE);
+  await tpl.removeFromSlideOrder(SITE_MAP_TEMPLATE);
+
+  const buffer = await tpl.save();
+  fs.writeFileSync(filePath, buffer);
   return `/generated/${path.basename(filePath)}`;
 }
 
 function generateProposalExcel(proposal) {
   const dir = ensureGeneratedDir();
   const filePath = path.join(dir, `${proposal.proposalId}.xlsx`);
+  const client = proposal.client || {};
 
-  const summarySheet = XLSX.utils.json_to_sheet([
-    {
-      ProposalId: proposal.proposalId,
-      Client: proposal.client?.name || '',
-      Variant: proposal.variant || '',
-      TotalAmount: proposal.totalAmount || 0,
-      GstAmount: proposal.gstAmount || 0,
-      MonthlyAmount: proposal.monthlyAmount || 0,
-    },
-  ]);
+  const rows = (proposal.sites || []).map((s, i) => ({
+    siNo: i + 1,
+    city: s.city,
+    media: s.mediaId,
+    location: s.location || s.areaName || '',
+    qty: s.quantity || 1,
+    width: s.width || 0,
+    height: s.height || 0,
+    type: s.illumination || '',
+    displayCostPerMonth: s.monthlyAmount || 0,
+    siteStatus: s.mediaStatus ? s.mediaStatus.charAt(0).toUpperCase() + s.mediaStatus.slice(1) : '',
+    vendorName: client.vendorName || '',
+    vendorCost: client.vendorCost || 0,
+  }));
 
-  const mediaSheet = XLSX.utils.json_to_sheet(
-    (proposal.sites || []).map((s) => ({
-      MediaName: s.mediaName,
-      MediaType: s.mediaType,
-      State: s.state,
-      City: s.city,
-      Location: s.location,
-      Status: s.mediaStatus,
-      MonthlyAmount: s.monthlyAmount,
-    }))
-  );
-
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, summarySheet, 'Summary');
-  XLSX.utils.book_append_sheet(workbook, mediaSheet, 'Media');
-  XLSX.writeFile(workbook, filePath);
-
-  return `/generated/${path.basename(filePath)}`;
+  return generateExcelFromTemplate(rows).then((buffer) => {
+    fs.writeFileSync(filePath, buffer);
+    return `/generated/${path.basename(filePath)}`;
+  });
 }
 
 module.exports = { generateProposalPpt, generateProposalExcel };

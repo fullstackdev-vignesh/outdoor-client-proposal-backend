@@ -134,7 +134,7 @@ const generateExcel = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error('Proposal not found');
   }
-  proposal.generatedExcelUrl = generateProposalExcel(proposal);
+  proposal.generatedExcelUrl = await generateProposalExcel(proposal);
   proposal.status = proposal.generatedPptUrl ? 'completed' : 'generated';
   await proposal.save();
   res.json(proposal);

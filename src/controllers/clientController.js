@@ -15,6 +15,7 @@ const getClients = asyncHandler(async (req, res) => {
       { email: new RegExp(req.query.search, 'i') },
     ];
   }
+  if (req.query.customerType) filter.customerType = req.query.customerType;
   const [items, total] = await Promise.all([
     Client.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit),
     Client.countDocuments(filter),
