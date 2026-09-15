@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const UPLOAD_DIR = path.join(__dirname, '..', '..', 'uploads', 'media');
+const UPLOAD_DIR = path.join(__dirname, '..', '..', 'uploads', 'outdoor-proposal');
 
 function buildFileName(originalName) {
   const ext = path.extname(originalName || '') || '.jpg';
@@ -13,7 +13,7 @@ async function saveLocal(file) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
   const fileName = buildFileName(file.originalname);
   fs.writeFileSync(path.join(UPLOAD_DIR, fileName), file.buffer);
-  return `/uploads/media/${fileName}`;
+  return `/uploads/outdoor-proposal/${fileName}`;
 }
 
 async function saveToSpace(file) {
