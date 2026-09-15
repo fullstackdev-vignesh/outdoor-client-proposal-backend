@@ -3,10 +3,11 @@ const ExcelJS = require('exceljs');
 const Site = require('../models/Site');
 const SiteHistory = require('../models/SiteHistory');
 const { saveMediaImage } = require('../utils/imageStorage');
-const { calcDurationDays, calcBookingAmount } = require('../utils/bookingCalc');
+const { calcDurationDays, calcBookingAmount, formatDateLabel, findOverlappingBooking } = require('../utils/bookingCalc');
 const { formatIST } = require('../utils/formatDate');
 const InventoryHistory = require('../models/InventoryHistory');
 const { recordStatusPeriod, buildOverlapFilter } = require('../services/inventoryTimeline');
+const { genBookingId, resolveSiteStatus } = require('../services/bookingScheduler');
 
 const IST_OFFSET_MS = 330 * 60000;
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
@@ -15,19 +16,69 @@ const TRACKED_FIELDS = [
   'mediaId', 'mediaType', 'quantity', 'state', 'city', 'location', 'areaName', 'locationDetails', 'siteOwner',
   'latitude', 'longitude', 'illumination', 'width', 'height', 'sizeUnit', 'amount', 'gstAmount',
   'monthlyAmount', 'printingCost', 'mountingCost', 'totalCost', 'mediaImage', 'isActive', 'mediaStatus',
+  'blockInfo.reason', 'blockInfo.notes',
 ];
 
-async function logFieldChanges(siteId, before, after, userId) {
+function getPath(obj, path) {
+  return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
+}
+
+// `changedAt` is hoisted by the caller so every SiteHistory row written for the SAME save
+// operation shares the exact same timestamp — the Edit History UI groups rows into one
+// event/card by matching this value exactly, rather than guessing from near-identical times.
+async function logFieldChanges(siteId, before, after, userId, changedAt) {
+  const ts = changedAt || nowIST();
   const entries = [];
   for (const field of TRACKED_FIELDS) {
-    const oldVal = before ? before[field] : undefined;
-    const newVal = after ? after[field] : undefined;
+    const oldVal = before ? getPath(before, field) : undefined;
+    const newVal = after ? getPath(after, field) : undefined;
     const oldStr = oldVal === undefined || oldVal === null ? '' : String(oldVal);
     const newStr = newVal === undefined || newVal === null ? '' : String(newVal);
     if (oldStr !== newStr) {
-      entries.push({ site: siteId, field, oldValue: oldVal, newValue: newVal, changedBy: userId, changedAt: nowIST() });
+      entries.push({ site: siteId, field, oldValue: oldVal, newValue: newVal, changedBy: userId, changedAt: ts });
     }
   }
+  if (entries.length) await SiteHistory.insertMany(entries);
+}
+
+const money = (n) => (n == null ? '' : `₹${Number(n).toLocaleString('en-IN')}`);
+const days = (n) => (n == null ? '' : `${n} Days`);
+
+// Diffs the site's booking array (by bookingId) into readable audit rows: a brand-new
+// bookingId becomes one "Booking Added" row; an existing bookingId whose fields changed
+// becomes one row per changed field (Customer/Start Date/End Date/Duration/Booking Amount).
+async function logBookingChanges(siteId, beforeBookings, afterBookings, userId, changedAt) {
+  const ts = changedAt || nowIST();
+  const entries = [];
+  const beforeById = new Map((beforeBookings || []).map((b) => [b.bookingId, b]));
+
+  (afterBookings || []).forEach((b, idx) => {
+    const prev = beforeById.get(b.bookingId);
+    if (!prev) {
+      entries.push({
+        site: siteId,
+        field: 'Booking Added',
+        oldValue: null,
+        newValue: `Booking #${idx + 1}: ${b.customerName || 'Customer'} (${formatDateLabel(b.startDate)} → ${formatDateLabel(b.endDate)})`,
+        changedBy: userId,
+        changedAt: ts,
+      });
+      return;
+    }
+    const pairs = [
+      ['Booking Customer', prev.customerName, b.customerName],
+      ['Booking Start Date', formatDateLabel(prev.startDate), formatDateLabel(b.startDate)],
+      ['Booking End Date', formatDateLabel(prev.endDate), formatDateLabel(b.endDate)],
+      ['Booking Duration', days(prev.durationDays), days(b.durationDays)],
+      ['Booking Amount', money(prev.amount), money(b.amount)],
+    ];
+    for (const [field, oldValue, newValue] of pairs) {
+      if ((oldValue || '') !== (newValue || '')) {
+        entries.push({ site: siteId, field, oldValue, newValue, changedBy: userId, changedAt: ts });
+      }
+    }
+  });
+
   if (entries.length) await SiteHistory.insertMany(entries);
 }
 
@@ -123,12 +174,19 @@ function normalizeSiteBody(body) {
   if (payload.mediaCode && !payload.mediaId) payload.mediaId = payload.mediaCode;
   delete payload.mediaCode;
   // multipart/form-data (used by Add/Edit Site so the image uploads in the same request)
-  // sends nested objects as a JSON string.
+  // sends nested objects/arrays as a JSON string.
   if (typeof payload.bookingInfo === 'string' && payload.bookingInfo) {
     try {
       payload.bookingInfo = JSON.parse(payload.bookingInfo);
     } catch {
       delete payload.bookingInfo;
+    }
+  }
+  if (typeof payload.bookings === 'string' && payload.bookings) {
+    try {
+      payload.bookings = JSON.parse(payload.bookings);
+    } catch {
+      delete payload.bookings;
     }
   }
   return payload;
@@ -145,6 +203,104 @@ async function applyUploadedImage(payload, req) {
   }
 }
 
+// Builds one booking record from raw input, checking it against `existingBookings` for a
+// date overlap (excluding its own bookingId when editing). Throws a friendly, user-facing
+// message — never allows an overlapping save.
+function buildBookingRecord(site, input, userId, existingBooking) {
+  const { customerType, client, customerName, startDate, endDate } = input || {};
+  if (!client) throw new Error('Customer is required');
+  if (!startDate || !endDate) throw new Error('Start Date and End Date are required');
+  if (new Date(endDate) < new Date(startDate)) throw new Error('End Date must be on or after Start Date');
+
+  const overlap = findOverlappingBooking(site.bookings, startDate, endDate, existingBooking?.bookingId);
+  if (overlap) {
+    throw new Error(`This site is already booked from ${formatDateLabel(overlap.startDate)} to ${formatDateLabel(overlap.endDate)}.`);
+  }
+
+  const durationDays = calcDurationDays(startDate, endDate);
+  const monthlyTotalCost = site.totalCost || site.monthlyAmount || 0;
+  const amount = calcBookingAmount(monthlyTotalCost, durationDays);
+
+  return {
+    bookingId: existingBooking?.bookingId || genBookingId(),
+    customerType: customerType === 'agency' ? 'agency' : 'client',
+    client,
+    customerName,
+    startDate,
+    endDate,
+    durationDays,
+    monthlyTotalCost,
+    amount,
+    status: existingBooking?.status || 'upcoming',
+    createdAt: existingBooking?.createdAt || nowIST(),
+    updatedAt: nowIST(),
+    createdBy: existingBooking?.createdBy || userId,
+    updatedBy: userId,
+  };
+}
+
+// Table quick-action path (StatusChangeModal/BulkStatusModal) — one booking at a time.
+// Edits the site's currently ACTIVE booking in place if there is one (so adjusting dates on
+// today's campaign doesn't create a duplicate row); otherwise appends a new booking.
+function upsertActiveBooking(site, input, userId) {
+  const activeId = site.mediaStatus === 'booked' ? site.bookingInfo?.bookingId : undefined;
+  const bookings = site.bookings || [];
+  const existingIndex = activeId ? bookings.findIndex((b) => b.bookingId === activeId) : -1;
+  const existing = existingIndex >= 0 ? bookings[existingIndex] : null;
+
+  const record = buildBookingRecord(site, input, userId, existing);
+  if (existingIndex >= 0) {
+    bookings[existingIndex] = record;
+  } else {
+    bookings.push(record);
+  }
+  site.bookings = bookings;
+  return record;
+}
+
+// Add/Edit Site's full "+ Add Booking" array path — the form always submits the complete,
+// authoritative list of bookings for the site. Every entry is re-validated (including
+// pairwise overlap across the whole set) and rebuilt; existing bookingIds are preserved so
+// history/createdAt/createdBy survive the round-trip.
+function buildBookingsArray(site, incomingBookings, userId) {
+  const existingById = new Map((site.bookings || []).map((b) => [b.bookingId, b]));
+  const built = [];
+
+  for (const input of incomingBookings) {
+    const existing = input.bookingId ? existingById.get(input.bookingId) : null;
+    const overlap = findOverlappingBooking(built, input.startDate, input.endDate, input.bookingId);
+    if (overlap) {
+      throw new Error(`This site is already booked from ${formatDateLabel(overlap.startDate)} to ${formatDateLabel(overlap.endDate)}.`);
+    }
+    if (!input.client) throw new Error('Customer is required for every booking');
+    if (!input.startDate || !input.endDate) throw new Error('Start Date and End Date are required for every booking');
+    if (new Date(input.endDate) < new Date(input.startDate)) throw new Error('End Date must be on or after Start Date');
+
+    const durationDays = calcDurationDays(input.startDate, input.endDate);
+    const monthlyTotalCost = site.totalCost || site.monthlyAmount || 0;
+    const amount = calcBookingAmount(monthlyTotalCost, durationDays);
+
+    built.push({
+      bookingId: existing?.bookingId || input.bookingId || genBookingId(),
+      customerType: input.customerType === 'agency' ? 'agency' : 'client',
+      client: input.client,
+      customerName: input.customerName,
+      startDate: input.startDate,
+      endDate: input.endDate,
+      durationDays,
+      monthlyTotalCost,
+      amount,
+      status: existing?.status || 'upcoming',
+      createdAt: existing?.createdAt || nowIST(),
+      updatedAt: nowIST(),
+      createdBy: existing?.createdBy || userId,
+      updatedBy: userId,
+    });
+  }
+
+  return built;
+}
+
 const createSite = asyncHandler(async (req, res) => {
   const payload = normalizeSiteBody(req.body);
   const errors = validateSitePayload(payload);
@@ -157,10 +313,11 @@ const createSite = asyncHandler(async (req, res) => {
   if (!payload.mediaStatus) payload.mediaStatus = 'available';
   if (!payload.illumination) payload.illumination = 'Front Lit';
 
-  const { blockReason, blockNotes, bookingInfo } = payload;
+  const { blockReason, blockNotes, bookingInfo, bookings: incomingBookings } = payload;
   delete payload.blockReason;
   delete payload.blockNotes;
   delete payload.bookingInfo;
+  delete payload.bookings;
 
   Site.applyComputedFields(payload);
 
@@ -172,8 +329,13 @@ const createSite = asyncHandler(async (req, res) => {
     payload.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
     payload.isActive = false;
   } else if (payload.mediaStatus === 'booked') {
+    const bookingList = Array.isArray(incomingBookings) && incomingBookings.length ? incomingBookings : bookingInfo ? [bookingInfo] : [];
+    if (!bookingList.length) {
+      res.status(400);
+      throw new Error('At least one booking is required');
+    }
     try {
-      payload.bookingInfo = buildBookingInfo(payload, bookingInfo, req.user._id);
+      payload.bookings = buildBookingsArray({ bookings: [], totalCost: payload.totalCost, monthlyAmount: payload.monthlyAmount }, bookingList, req.user._id);
     } catch (err) {
       res.status(400);
       throw err;
@@ -193,6 +355,12 @@ const createSite = asyncHandler(async (req, res) => {
     }
     throw err;
   }
+
+  // The live status must reflect TODAY against the booking dates just saved — a booking
+  // starting in the future keeps the site Available until its start date arrives.
+  resolveSiteStatus(site);
+  await site.save();
+
   await recordStatusPeriod({ site, previousStatus: null, source: 'sites', userId: req.user._id });
   res.status(201).json({ ...site.toObject(), mediaCode: site.mediaId });
 });
@@ -211,8 +379,11 @@ const updateSite = asyncHandler(async (req, res) => {
   }
   await applyUploadedImage(payload, req);
   const before = site.toObject();
+  const beforeBookings = before.bookings || [];
+  const beforeStatus = before.mediaStatus;
+  const beforeBookingId = before.bookingInfo?.bookingId;
 
-  const { blockReason, blockNotes, bookingInfo, ...siteFields } = payload;
+  const { blockReason, blockNotes, bookingInfo, bookings: incomingBookings, ...siteFields } = payload;
   Object.assign(site, siteFields);
   Site.applyComputedFields(site);
 
@@ -223,16 +394,19 @@ const updateSite = asyncHandler(async (req, res) => {
     }
     site.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
     site.isActive = false;
-  } else if (site.mediaStatus === 'booked') {
-    try {
-      site.bookingInfo = buildBookingInfo(site, bookingInfo, req.user._id);
-    } catch (err) {
-      res.status(400);
-      throw err;
-    }
-    site.isActive = true;
   } else {
-    site.isActive = true;
+    const bookingList = Array.isArray(incomingBookings) ? incomingBookings : bookingInfo ? [bookingInfo] : null;
+    if (site.mediaStatus === 'booked' && bookingList) {
+      try {
+        site.bookings = buildBookingsArray(site, bookingList, req.user._id);
+      } catch (err) {
+        res.status(400);
+        throw err;
+      }
+    }
+    // Live status/bookingInfo always get recomputed from the (possibly just-edited)
+    // bookings array against today's date — never taken at face value from the toggle.
+    resolveSiteStatus(site);
   }
 
   try {
@@ -244,10 +418,14 @@ const updateSite = asyncHandler(async (req, res) => {
     }
     throw err;
   }
-  if (before.mediaStatus !== site.mediaStatus) {
-    await recordStatusPeriod({ site, previousStatus: before.mediaStatus, source: 'sites', userId: req.user._id });
+
+  const statusChanged = beforeStatus !== site.mediaStatus || beforeBookingId !== site.bookingInfo?.bookingId;
+  if (statusChanged) {
+    await recordStatusPeriod({ site, previousStatus: beforeStatus, source: 'sites', userId: req.user._id });
   }
-  await logFieldChanges(site._id, before, site.toObject(), req.user._id);
+  const changedAt = nowIST();
+  await logFieldChanges(site._id, before, site.toObject(), req.user._id, changedAt);
+  await logBookingChanges(site._id, beforeBookings, site.bookings, req.user._id, changedAt);
   res.json({ ...site.toObject(), mediaCode: site.mediaId });
 });
 
@@ -261,28 +439,6 @@ const deleteSite = asyncHandler(async (req, res) => {
   res.json({ message: 'Site deleted' });
 });
 
-function buildBookingInfo(site, bookingInfo, userId) {
-  const { customerType, client, startDate, endDate } = bookingInfo || {};
-  if (!client) throw new Error('Customer is required');
-  if (!startDate || !endDate) throw new Error('Start Date and End Date are required');
-  if (new Date(endDate) < new Date(startDate)) throw new Error('End Date must be on or after Start Date');
-
-  const durationDays = calcDurationDays(startDate, endDate);
-  const monthlyTotalCost = site.totalCost || site.monthlyAmount || 0;
-  const amount = calcBookingAmount(monthlyTotalCost, durationDays);
-
-  return {
-    customerType: customerType === 'agency' ? 'agency' : 'client',
-    client,
-    startDate,
-    endDate,
-    durationDays,
-    monthlyTotalCost,
-    amount,
-    bookedBy: userId,
-  };
-}
-
 const changeStatus = asyncHandler(async (req, res) => {
   const site = await Site.findById(req.params.id);
   if (!site) {
@@ -291,6 +447,9 @@ const changeStatus = asyncHandler(async (req, res) => {
   }
   const { mediaStatus, blockReason, blockNotes, bookingInfo, source } = req.body;
   const before = site.toObject();
+  const beforeBookings = before.bookings || [];
+  const beforeStatus = before.mediaStatus;
+  const beforeBookingId = before.bookingInfo?.bookingId;
 
   if (!['available', 'booked', 'blocked'].includes(mediaStatus)) {
     res.status(400);
@@ -302,31 +461,34 @@ const changeStatus = asyncHandler(async (req, res) => {
       res.status(400);
       throw new Error('Block reason is required');
     }
-    site.blockInfo = {
-      reason: blockReason,
-      notes: blockNotes,
-      blockedDate: nowIST(),
-      blockedBy: req.user._id,
-    };
-  } else if (mediaStatus === 'booked') {
-    try {
-      site.bookingInfo = buildBookingInfo(site, bookingInfo, req.user._id);
-    } catch (err) {
-      res.status(400);
-      throw err;
+    site.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
+    site.mediaStatus = 'blocked';
+    site.isActive = false;
+  } else {
+    if (mediaStatus === 'booked') {
+      try {
+        upsertActiveBooking(site, bookingInfo, req.user._id);
+      } catch (err) {
+        res.status(400);
+        throw err;
+      }
     }
+    // Live status/bookingInfo are always recomputed from the bookings array against
+    // today's date, not taken at face value from the requested `mediaStatus`.
+    resolveSiteStatus(site);
   }
 
-  const previousStatus = site.mediaStatus;
-  site.mediaStatus = mediaStatus;
-  site.isActive = mediaStatus !== 'blocked';
-  // Status changes made from /sites bump siteUpdatedAt (updatedAt); changes made from
-  // /inventory bump inventoryUpdatedAt only. Status itself always syncs on both pages.
-  const resolvedSource = source === 'inventory' ? 'inventory' : 'sites';
-  site.$locals.inventoryOnly = resolvedSource === 'inventory';
   await site.save();
-  await recordStatusPeriod({ site, previousStatus, source: resolvedSource, userId: req.user._id });
-  await logFieldChanges(site._id, before, site.toObject(), req.user._id);
+
+  const statusChanged = beforeStatus !== site.mediaStatus || beforeBookingId !== site.bookingInfo?.bookingId;
+  if (statusChanged) {
+    // `source` still labels the Timeline entry "via Sites"/"via Inventory" — it no longer
+    // decides which timestamp bumps (that's fully data-driven in the Site model now).
+    await recordStatusPeriod({ site, previousStatus: beforeStatus, source: source === 'inventory' ? 'inventory' : 'sites', userId: req.user._id });
+  }
+  const changedAt = nowIST();
+  await logFieldChanges(site._id, before, site.toObject(), req.user._id, changedAt);
+  await logBookingChanges(site._id, beforeBookings, site.bookings, req.user._id, changedAt);
   res.json({ ...site.toObject(), mediaCode: site.mediaId });
 });
 
@@ -347,27 +509,41 @@ const bulkChangeStatus = asyncHandler(async (req, res) => {
 
   const sites = await Site.find({ _id: { $in: siteIds } });
   const results = [];
+  const skipped = [];
   for (const site of sites) {
     const before = site.toObject();
-    const previousStatus = site.mediaStatus;
+    const beforeBookings = before.bookings || [];
+    const beforeStatus = before.mediaStatus;
+    const beforeBookingId = before.bookingInfo?.bookingId;
+
     if (mediaStatus === 'blocked') {
       site.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
-    } else if (mediaStatus === 'booked') {
-      try {
-        site.bookingInfo = buildBookingInfo(site, bookingInfo, req.user._id);
-      } catch (err) {
-        continue;
+      site.mediaStatus = 'blocked';
+      site.isActive = false;
+    } else {
+      if (mediaStatus === 'booked') {
+        try {
+          upsertActiveBooking(site, bookingInfo, req.user._id);
+        } catch (err) {
+          skipped.push({ site: site.mediaId, reason: err.message });
+          continue;
+        }
       }
+      resolveSiteStatus(site);
     }
-    site.mediaStatus = mediaStatus;
-    site.isActive = mediaStatus !== 'blocked';
-    site.$locals.inventoryOnly = true;
+
     await site.save();
-    await recordStatusPeriod({ site, previousStatus, source: 'inventory', userId: req.user._id });
-    await logFieldChanges(site._id, before, site.toObject(), req.user._id);
+
+    const statusChanged = beforeStatus !== site.mediaStatus || beforeBookingId !== site.bookingInfo?.bookingId;
+    if (statusChanged) {
+      await recordStatusPeriod({ site, previousStatus: beforeStatus, source: 'inventory', userId: req.user._id });
+    }
+    const changedAt = nowIST();
+    await logFieldChanges(site._id, before, site.toObject(), req.user._id, changedAt);
+    await logBookingChanges(site._id, beforeBookings, site.bookings, req.user._id, changedAt);
     results.push(site._id);
   }
-  res.json({ updated: results.length, total: siteIds.length });
+  res.json({ updated: results.length, total: siteIds.length, skipped });
 });
 
 const getSiteHistory = asyncHandler(async (req, res) => {

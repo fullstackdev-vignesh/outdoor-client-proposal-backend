@@ -5,6 +5,7 @@ const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 
 const bookingInfoSchema = new mongoose.Schema(
   {
+    bookingId: String,
     customerType: { type: String, enum: ['client', 'agency'], default: 'client' },
     client: { type: mongoose.Schema.Types.ObjectId, ref: 'Client' },
     booking: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking' },
@@ -19,6 +20,31 @@ const bookingInfoSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// One row per booking order. A site can hold many, as long as their date ranges never
+// overlap (enforced in the controller/service layer, not here). `bookingInfo` above stays
+// as a cached snapshot of whichever booking is CURRENTLY ACTIVE (or null), recomputed by
+// services/bookingScheduler.js — every existing consumer of site.bookingInfo keeps working
+// unchanged.
+const bookingRecordSchema = new mongoose.Schema(
+  {
+    bookingId: { type: String, required: true },
+    customerType: { type: String, enum: ['client', 'agency'], default: 'client' },
+    client: { type: mongoose.Schema.Types.ObjectId, ref: 'Client' },
+    customerName: String,
+    startDate: { type: Date, required: true },
+    endDate: { type: Date, required: true },
+    durationDays: Number,
+    monthlyTotalCost: Number,
+    amount: Number,
+    status: { type: String, enum: ['upcoming', 'active', 'completed', 'cancelled'], default: 'upcoming' },
+    createdAt: { type: Date, default: nowIST },
+    updatedAt: { type: Date, default: nowIST },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  },
+  { _id: false }
+);
+
 const blockInfoSchema = new mongoose.Schema(
   {
     reason: String,
@@ -28,6 +54,18 @@ const blockInfoSchema = new mongoose.Schema(
   },
   { _id: false }
 );
+
+// Fields that represent Site MASTER data — changing any of these bumps `updatedAt` only.
+const MASTER_FIELDS = [
+  'mediaId', 'mediaName', 'mediaType', 'quantity', 'state', 'city', 'location', 'areaName',
+  'locationDetails', 'siteOwner', 'latitude', 'longitude', 'illumination', 'width', 'height',
+  'sizeUnit', 'autoSize', 'amount', 'gstAmount', 'monthlyAmount', 'printingCost', 'mountingCost',
+  'totalCost', 'mediaImage',
+];
+
+// Fields that represent live Inventory/status/booking state — changing any of these bumps
+// `inventoryUpdatedAt` only. A single save can bump BOTH if it touches both groups.
+const INVENTORY_FIELDS = ['mediaStatus', 'bookingInfo', 'bookings', 'blockInfo', 'isActive'];
 
 const siteSchema = new mongoose.Schema(
   {
@@ -62,7 +100,10 @@ const siteSchema = new mongoose.Schema(
       default: 'available',
       index: true,
     },
+    // Cached snapshot of the currently-active booking (or undefined). Kept in sync by
+    // services/bookingScheduler.js#resolveSiteStatus — never edited directly by controllers.
     bookingInfo: bookingInfoSchema,
+    bookings: { type: [bookingRecordSchema], default: [] },
     blockInfo: blockInfoSchema,
     assignedTL: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -75,23 +116,27 @@ const siteSchema = new mongoose.Schema(
 
 function applyComputedFields(doc) {
   if (doc.width != null && doc.height != null) {
-    doc.autoSize = Number(doc.width) * Number(doc.height);
+    const autoSize = Number(doc.width) * Number(doc.height);
+    if (doc.autoSize !== autoSize) doc.autoSize = autoSize;
   }
   const display = Number(doc.monthlyAmount) || 0;
   const printing = Number(doc.printingCost) || 0;
   const mounting = Number(doc.mountingCost) || 0;
-  doc.totalCost = display + printing + mounting;
+  const totalCost = display + printing + mounting;
+  if (doc.totalCost !== totalCost) doc.totalCost = totalCost;
 }
 
+// Timestamp rule: driven by WHAT DATA changed, never by which page/endpoint was used.
 siteSchema.pre('save', function (next) {
   const now = nowIST();
   if (!this.createdAt) this.createdAt = now;
   applyComputedFields(this);
-  if (this.$locals.inventoryOnly) {
-    this.inventoryUpdatedAt = now;
-  } else {
-    this.updatedAt = now;
-  }
+
+  const masterChanged = this.isNew || MASTER_FIELDS.some((f) => this.isModified(f));
+  const inventoryChanged = this.isNew || INVENTORY_FIELDS.some((f) => this.isModified(f)) || this.$locals.forceInventoryTouch;
+
+  if (masterChanged) this.updatedAt = now;
+  if (inventoryChanged) this.inventoryUpdatedAt = now;
   next();
 });
 
@@ -104,4 +149,6 @@ siteSchema.index({ mediaId: 'text', location: 'text', city: 'text', state: 'text
 
 const Site = mongoose.model('Site', siteSchema);
 Site.applyComputedFields = applyComputedFields;
+Site.MASTER_FIELDS = MASTER_FIELDS;
+Site.INVENTORY_FIELDS = INVENTORY_FIELDS;
 module.exports = Site;
