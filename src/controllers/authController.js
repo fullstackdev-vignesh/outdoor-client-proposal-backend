@@ -94,17 +94,23 @@ const register = asyncHandler(async (req, res) => {
 });
 
 const login = asyncHandler(async (req, res) => {
-  const { userPhone, phone, email, password, role } = req.body;
+  const { userPhone, phone, email, identifier, password, role } = req.body;
 
-  const loginEmail = email ? email.trim().toLowerCase() : null;
-  const loginPhone = userPhone ? userPhone.trim() : (phone ? phone.trim() : null);
+  const loginInput = email || identifier || phone || userPhone;
 
-  let user;
-  if (loginEmail) {
-    user = await User.findOne({ email: loginEmail }).select('+password');
-  } else if (loginPhone) {
-    user = await User.findOne({ phone: loginPhone }).select('+password');
+  if (!loginInput) {
+    res.status(400);
+    throw new Error('Email or phone number is required');
   }
+
+  const trimmedInput = loginInput.trim();
+
+  let user = await User.findOne({
+    $or: [
+      { email: trimmedInput.toLowerCase() },
+      { phone: trimmedInput }
+    ]
+  }).select('+password');
 
   if (!user) {
     res.status(401);
