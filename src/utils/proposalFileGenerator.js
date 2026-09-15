@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { PptxTemplate, SITE_SPEC_TEMPLATE, SITE_MAP_TEMPLATE, THANK_YOU_SLIDE, extOf } = require('./pptxTemplateEngine');
+const { PptxTemplate, extOf } = require('./pptxTemplateEngine');
 const { generateExcelFromTemplate } = require('./excelTemplateEngine');
 const { getRouteMapBuffer } = require('./mapService');
 
@@ -12,11 +12,27 @@ function ensureGeneratedDir() {
   return GENERATED_DIR;
 }
 
-function localImage(image) {
-  if (!image || /^(https?:|data:|blob:)/.test(image)) return null;
-  const abs = path.join(BACKEND_ROOT, image.replace(/^\//, ''));
-  if (!fs.existsSync(abs)) return null;
-  return { buffer: fs.readFileSync(abs), ext: extOf(abs) || 'jpg' };
+async function getImageBuffer(image) {
+  if (!image) return null;
+  if (!/^https?:\/\//i.test(image)) {
+    const abs = path.join(BACKEND_ROOT, image.replace(/^\//, ''));
+    if (fs.existsSync(abs)) {
+      return { buffer: fs.readFileSync(abs), ext: extOf(abs) || 'jpg' };
+    }
+    return null;
+  }
+  try {
+    const response = await fetch(image);
+    if (!response.ok) return null;
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const extMatch = image.match(/\.(jpg|jpeg|png|webp|gif)(?:\?|$)/i);
+    const ext = extMatch ? extMatch[1].toLowerCase() : 'jpg';
+    return { buffer, ext };
+  } catch (err) {
+    console.error('Failed to download media image:', image, err.message);
+    return null;
+  }
 }
 
 function customerLabel(proposal) {
@@ -32,7 +48,8 @@ async function generateProposalPpt(proposal) {
   const dir = ensureGeneratedDir();
   const filePath = path.join(dir, `${proposal.proposalId}.pptx`);
 
-  const tpl = await PptxTemplate.load();
+  const pptTemplateObj = proposal.pptTemplate || {};
+  const tpl = await PptxTemplate.load(pptTemplateObj.fileUrl);
   const client = proposal.client || {};
   const sites = proposal.sites || [];
 
@@ -41,54 +58,139 @@ async function generateProposalPpt(proposal) {
     dateLabel: formatDisplayDate(new Date()),
   });
 
-  const insertedBaseNames = [];
+  const slideFiles = await tpl.getSlideFiles();
+  const coverTpl = slideFiles[0] || 'slide1';
 
+  // Read text content from each slide to dynamically identify roles
+  const slideTexts = {};
+  for (const sf of slideFiles) {
+    const xml = await tpl.readText(`ppt/slides/${sf}.xml`);
+    const texts = [...xml.matchAll(/<a:t>([^<]+)<\/a:t>/g)].map((m) => m[1].trim()).filter(Boolean);
+    slideTexts[sf] = texts;
+  }
+
+  let cityDividerTpl = null;
+  let siteSpecTpl = null;
+  let siteMapTpl = null;
+  let thankYouTpl = null;
+
+  for (const sf of slideFiles) {
+    const txts = slideTexts[sf].join(' ').toLowerCase();
+    if (!cityDividerTpl && (sf === 'slide2' || txts.includes('chennai') || txts.includes('madurai') || txts.includes('city'))) {
+      cityDividerTpl = sf;
+    }
+    if (!siteSpecTpl && (txts.includes('duration') || txts.includes('media type') || txts.includes('illumination') || txts.includes('flyover') || txts.includes('bridge') || txts.includes('hoarding') || txts.includes('unipole') || txts.includes('40x30'))) {
+      siteSpecTpl = sf;
+    }
+    if (!siteMapTpl && (txts.includes('route map') || txts.includes('distance') || txts.includes('map'))) {
+      siteMapTpl = sf;
+    }
+    if (txts.includes('thank you') || txts.includes('thanks') || txts.includes('awaiting your approval') || txts.includes('with regards')) {
+      thankYouTpl = sf;
+    }
+  }
+
+  if (!cityDividerTpl && slideFiles.length >= 2) cityDividerTpl = slideFiles[1];
+  if (!siteSpecTpl && slideFiles.length >= 3) siteSpecTpl = slideFiles[2];
+
+  // Group requested proposal sites by city
+  const sitesByCity = {};
   for (const site of sites) {
-    const siteImage = localImage(site.mediaImage);
-    const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
-    const specTextReplacements = [
-      ['Chennai', site.city || '-'],
-      ['Hoarding', site.mediaType || '-'],
-      ['Frontlit', site.illumination || '-'],
-      ['40x30', sizeLabel || '-'],
-      ['1', String(site.quantity || 1)],
-      ['Periyanayakanpalayam bridge towards Mettupalayam 40x30', `${site.location || site.areaName || site.city} ${sizeLabel}`.trim()],
-    ];
+    const city = site.city || 'Other';
+    if (!sitesByCity[city]) sitesByCity[city] = [];
+    sitesByCity[city].push(site);
+  }
 
-    const specBase = await tpl.cloneSlide(SITE_SPEC_TEMPLATE, {
-      textReplacements: specTextReplacements,
-      imageReplacements: siteImage ? [{ relId: 'rId2', buffer: siteImage.buffer, ext: siteImage.ext }] : [],
-    });
-    insertedBaseNames.push(specBase);
+  const finalOrderedSlides = [coverTpl];
 
-    const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
-    if (hasCoords) {
-      const mapBuffer = await getRouteMapBuffer({
-        fromLat: client.latitude,
-        fromLng: client.longitude,
-        toLat: site.latitude,
-        toLng: site.longitude,
-      });
-      if (mapBuffer) {
-        const mapBase = await tpl.cloneSlide(SITE_MAP_TEMPLATE, {
+  for (const [city, citySites] of Object.entries(sitesByCity)) {
+    const stateName = citySites[0]?.state || client?.state || 'Tamil Nadu';
+
+    // 1. City / State Divider Slide
+    if (cityDividerTpl) {
+      const cityDividerBase = await tpl.cloneSlide(
+        cityDividerTpl,
+        {
           textReplacements: [
-            ['Periyanayakanpalayam bridge towards Mettupalayam 40x30', `${site.location || site.areaName || site.city} ${sizeLabel}`.trim()],
+            ['Chennai', city],
+            ['Madurai', city],
+            ['Tamil Nadu', stateName],
+            ['City:', `City: ${city}`],
+            ['State:', `State: ${stateName}`],
           ],
-          imageReplacements: [
-            ...(siteImage ? [{ relId: 'rId2', buffer: siteImage.buffer, ext: siteImage.ext }, { relId: 'rId6', buffer: siteImage.buffer, ext: siteImage.ext }] : []),
-            { relId: 'rId7', buffer: mapBuffer, ext: 'png' },
-          ],
+        },
+        { city, state: stateName }
+      );
+      finalOrderedSlides.push(cityDividerBase);
+    }
+
+    // 2. Site Spec Slide for each requested site
+    for (const site of citySites) {
+      const siteImage = await getImageBuffer(site.image || site.mediaImage);
+      const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
+      const durationLabel = site.bookingInfo?.durationDays ? `${site.bookingInfo.durationDays} Days` : '30 Days';
+
+      const specTextReplacements = [
+        ['Chennai', site.city || '-'],
+        ['Madurai', site.city || '-'],
+        ['Tamil Nadu', site.state || '-'],
+        ['Hoarding', site.mediaType || '-'],
+        ['Unipole', site.mediaType || '-'],
+        ['LED Hoarding', site.mediaType || '-'],
+        ['Frontlit', site.illumination || '-'],
+        ['Front Lit', site.illumination || '-'],
+        ['Backlit', site.illumination || '-'],
+        ['Back Lit', site.illumination || '-'],
+        ['40x30', sizeLabel || '-'],
+        ['40x20', sizeLabel || '-'],
+        ['50x30', sizeLabel || '-'],
+        ['30 Days', durationLabel],
+        ['1', String(site.quantity || 1)],
+      ];
+
+      const specBase = await tpl.cloneSlide(
+        siteSpecTpl,
+        {
+          textReplacements: specTextReplacements,
+          imageReplacements: siteImage ? [siteImage] : [],
+        },
+        site
+      );
+      finalOrderedSlides.push(specBase);
+
+      const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
+      if (hasCoords && siteMapTpl) {
+        const mapBuffer = await getRouteMapBuffer({
+          fromLat: client.latitude,
+          fromLng: client.longitude,
+          toLat: site.latitude,
+          toLng: site.longitude,
         });
-        insertedBaseNames.push(mapBase);
+        if (mapBuffer) {
+          const mapBase = await tpl.cloneSlide(
+            siteMapTpl,
+            {
+              textReplacements: specTextReplacements,
+              imageReplacements: [
+                ...(siteImage ? [siteImage, siteImage] : []),
+                { buffer: mapBuffer, ext: 'png' },
+              ],
+            },
+            site
+          );
+          finalOrderedSlides.push(mapBase);
+        }
       }
     }
   }
 
-  if (insertedBaseNames.length) {
-    await tpl.insertSlides(insertedBaseNames, 'slide3');
+  // 3. Append Thank You slide at the very end
+  if (thankYouTpl && thankYouTpl !== coverTpl) {
+    finalOrderedSlides.push(thankYouTpl);
   }
-  await tpl.removeFromSlideOrder(SITE_SPEC_TEMPLATE);
-  await tpl.removeFromSlideOrder(SITE_MAP_TEMPLATE);
+
+  // Set the exact final slide list in presentation.xml (removes all dummy template slides)
+  await tpl.setFinalSlideOrder(finalOrderedSlides);
 
   const buffer = await tpl.save();
   fs.writeFileSync(filePath, buffer);

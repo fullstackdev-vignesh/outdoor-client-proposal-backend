@@ -1,4 +1,5 @@
 const asyncHandler = require('express-async-handler');
+const { saveTemplateFile } = require('../utils/templateStorage');
 
 function makeTemplateController(Model) {
   const getAll = asyncHandler(async (req, res) => {
@@ -19,7 +20,11 @@ function makeTemplateController(Model) {
   });
 
   const create = asyncHandler(async (req, res) => {
-    const item = await Model.create({ ...req.body, createdBy: req.user._id });
+    const payload = { ...req.body, createdBy: req.user._id };
+    if (req.file) {
+      payload.fileUrl = saveTemplateFile(req.file);
+    }
+    const item = await Model.create(payload);
     res.status(201).json(item);
   });
 
@@ -28,6 +33,9 @@ function makeTemplateController(Model) {
     if (!item) {
       res.status(404);
       throw new Error('Template not found');
+    }
+    if (req.file) {
+      req.body.fileUrl = saveTemplateFile(req.file);
     }
     Object.assign(item, req.body);
     await item.save();

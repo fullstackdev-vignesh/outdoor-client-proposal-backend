@@ -3,25 +3,24 @@ const path = require('path');
 const JSZip = require('jszip');
 
 const MASTER_PPTX_PATH = path.join(__dirname, '..', '..', 'assets', 'proposal-templates', 'master.pptx');
-
-// Slide 1 = cover, Slide 2/3 = static About Us / Why Choose Us, Slide 4 = per-site
-// "Media Specifications" template, Slide 5 = per-site map template, Slide 6 = Thank You.
-const SITE_SPEC_TEMPLATE = 'slide4';
-const SITE_MAP_TEMPLATE = 'slide5';
-const THANK_YOU_SLIDE = 'slide6';
+const BACKEND_ROOT = path.join(__dirname, '..', '..');
 
 function xmlEscape(str) {
   return String(str ?? '').replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
 }
 
-function replaceRunOnce(xml, oldText, newText) {
-  const target = `<a:t>${oldText}</a:t>`;
-  if (!xml.includes(target)) return xml;
-  return xml.replace(target, `<a:t>${xmlEscape(newText)}</a:t>`);
-}
-
 function extOf(filename) {
   return path.extname(filename).replace('.', '').toLowerCase();
+}
+
+function removeRedHighlightShapes(slideXml) {
+  const spRegex = /<p:sp\b[^>]*>[\s\S]*?<\/p:sp>/g;
+  return slideXml.replace(spRegex, (match) => {
+    if (/srgbClr\s+val="(?:FF0000|C00000|ED1C24|FF0022|990000)"/i.test(match)) {
+      return '';
+    }
+    return match;
+  });
 }
 
 class PptxTemplate {
@@ -33,10 +32,19 @@ class PptxTemplate {
     this._nextSldId = 900;
   }
 
-  static async load() {
-    const buf = fs.readFileSync(MASTER_PPTX_PATH);
+  static async load(customPath) {
+    let targetPath = MASTER_PPTX_PATH;
+    if (customPath) {
+      const absCustom = path.resolve(BACKEND_ROOT, customPath.replace(/^\//, ''));
+      if (fs.existsSync(absCustom)) {
+        targetPath = absCustom;
+      }
+    }
+    const buf = fs.readFileSync(targetPath);
     const zip = await JSZip.loadAsync(buf);
-    return new PptxTemplate(zip);
+    const tpl = new PptxTemplate(zip);
+    await tpl.ensureImageDefaults();
+    return tpl;
   }
 
   async readText(partPath) {
@@ -47,33 +55,89 @@ class PptxTemplate {
     this.zip.file(partPath, content);
   }
 
+  async ensureImageDefaults() {
+    const contentTypesPath = '[Content_Types].xml';
+    if (!this.zip.file(contentTypesPath)) return;
+    let contentTypes = await this.readText(contentTypesPath);
+    const defaults = [
+      '<Default Extension="png" ContentType="image/png"/>',
+      '<Default Extension="jpeg" ContentType="image/jpeg"/>',
+      '<Default Extension="jpg" ContentType="image/jpeg"/>',
+      '<Default Extension="webp" ContentType="image/webp"/>',
+    ];
+    for (const d of defaults) {
+      if (!contentTypes.includes(d)) {
+        contentTypes = contentTypes.replace('</Types>', `${d}</Types>`);
+      }
+    }
+    this.writeText(contentTypesPath, contentTypes);
+  }
+
+  async getSlideFiles() {
+    const files = [];
+    const slidesFolder = this.zip.folder('ppt/slides');
+    if (slidesFolder) {
+      slidesFolder.forEach((relativePath) => {
+        if (/^slide\d+\.xml$/.test(relativePath)) {
+          files.push(relativePath.replace('.xml', ''));
+        }
+      });
+    }
+    files.sort((a, b) => parseInt(a.replace('slide', '')) - parseInt(b.replace('slide', '')));
+    return files;
+  }
+
   async addMediaFile(buffer, ext) {
     const name = `image_gen_${this._nextMediaIndex++}.${ext}`;
     this.zip.file(`ppt/media/${name}`, buffer);
     return `../media/${name}`;
   }
 
-  /** Replace the media Target for a given relationship Id inside a slide's .rels XML. */
   replaceRelTarget(relsXml, relId, newTarget) {
     const re = new RegExp(`(<Relationship Id="${relId}"[^>]*Target=")[^"]*(")`);
     return relsXml.replace(re, `$1${newTarget}$2`);
   }
 
-  async cloneSlide(templateBaseName, mutations) {
+  async cloneSlide(templateBaseName, mutations, siteContext) {
     const slidePath = `ppt/slides/${templateBaseName}.xml`;
     const relsPath = `ppt/slides/_rels/${templateBaseName}.xml.rels`;
 
     let slideXml = await this.readText(slidePath);
-    let relsXml = await this.readText(relsPath);
+    let relsXml = this.zip.file(relsPath) ? await this.readText(relsPath) : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
 
+    // Remove red highlight boxes from template slide
+    slideXml = removeRedHighlightShapes(slideXml);
+
+    // 1. Exact text replacements
     for (const [oldText, newText] of mutations.textReplacements || []) {
-      slideXml = replaceRunOnce(slideXml, oldText, newText);
+      const target = `<a:t>${oldText}</a:t>`;
+      if (slideXml.includes(target)) {
+        slideXml = slideXml.replace(target, `<a:t>${xmlEscape(newText)}</a:t>`);
+      }
     }
 
-    for (const { relId, buffer, ext } of mutations.imageReplacements || []) {
+    // 2. Smart fallback replacement for location/description if siteContext is provided
+    if (siteContext) {
+      const siteDesc = `${siteContext.location || siteContext.mediaName || siteContext.city} (${siteContext.mediaId || '-'}) ${siteContext.width && siteContext.height ? `${siteContext.width}x${siteContext.height}` : ''}`.trim();
+      const locationTagRegex = /<a:t>([^<]*(?:flyover|bridge|towards|junction|bypass|signal|road|street|avenue|cross|sq|st|pass)[^<]*)<\/a:t>/gi;
+      if (locationTagRegex.test(slideXml)) {
+        slideXml = slideXml.replace(locationTagRegex, `<a:t>${xmlEscape(siteDesc)}</a:t>`);
+      }
+    }
+
+    // 3. Image replacements
+    for (const { buffer, ext } of mutations.imageReplacements || []) {
       if (!buffer) continue;
       const target = await this.addMediaFile(buffer, ext);
-      relsXml = this.replaceRelTarget(relsXml, relId, target);
+      const imageRelMatches = [...relsXml.matchAll(/Id="(rId\d+)"[^>]*Type="[^"]*relationships\/image"/g)];
+      if (imageRelMatches.length > 0) {
+        for (const match of imageRelMatches) {
+          const relId = match[1];
+          relsXml = this.replaceRelTarget(relsXml, relId, target);
+        }
+      } else {
+        relsXml = this.replaceRelTarget(relsXml, 'rId2', target);
+      }
     }
 
     const newBaseName = `slide_gen_${this._nextSlideIndex++}`;
@@ -82,65 +146,86 @@ class PptxTemplate {
     this.writeText(newSlidePath, slideXml);
     this.writeText(newRelsPath, relsXml);
 
+    // Register relationship and content type for the cloned slide
+    const newRelId = `rIdGen${this._nextRelId++}`;
+    const contentTypesPath = '[Content_Types].xml';
+    let contentTypes = await this.readText(contentTypesPath);
+    const overrideTag = `PartName="/ppt/slides/${newBaseName}.xml"`;
+    if (!contentTypes.includes(overrideTag)) {
+      contentTypes = contentTypes.replace(
+        '</Types>',
+        `<Override ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml" PartName="/ppt/slides/${newBaseName}.xml"/></Types>`
+      );
+      this.writeText(contentTypesPath, contentTypes);
+    }
+
+    let presRels = await this.readText('ppt/_rels/presentation.xml.rels');
+    presRels = presRels.replace(
+      '</Relationships>',
+      `<Relationship Id="${newRelId}" Target="slides/${newBaseName}.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"/></Relationships>`
+    );
+    this.writeText('ppt/_rels/presentation.xml.rels', presRels);
+
     return newBaseName;
   }
 
   async setCoverFields({ customerLabel, dateLabel }) {
     let slideXml = await this.readText('ppt/slides/slide1.xml');
-    slideXml = replaceRunOnce(slideXml, 'Maxi Vision Eye Hospital', customerLabel);
-    slideXml = replaceRunOnce(slideXml, 'ate: Aug 10, 2026', `ate: ${dateLabel}`);
+    slideXml = slideXml.replace(/<a:t>[^<]*<\/a:t>/g, (match) => {
+      if (match.includes('Maxi Vision') || match.includes('Hospital') || match.includes('Proposal')) {
+        return `<a:t>${xmlEscape(customerLabel)}</a:t>`;
+      }
+      return match;
+    });
     this.writeText('ppt/slides/slide1.xml', slideXml);
   }
 
-  /** Registers newly cloned slide parts into presentation.xml / rels / [Content_Types].xml, inserted after `afterBaseName`. */
-  async insertSlides(baseNames, afterBaseName) {
-    const contentTypesPath = '[Content_Types].xml';
-    let contentTypes = await this.readText(contentTypesPath);
-    let presRels = await this.readText('ppt/_rels/presentation.xml.rels');
-    let presentation = await this.readText('ppt/presentation.xml');
+  async setFinalSlideOrder(orderedBaseNames) {
+    const presRelsXml = await this.readText('ppt/_rels/presentation.xml.rels');
+    let presentationXml = await this.readText('ppt/presentation.xml');
 
-    const newSldIdEntries = [];
-    for (const baseName of baseNames) {
-      contentTypes = contentTypes.replace(
-        '</Types>',
-        `<Override ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml" PartName="/ppt/slides/${baseName}.xml"/></Types>`
-      );
-
-      const relId = `rIdGen${this._nextRelId++}`;
-      presRels = presRels.replace(
-        '</Relationships>',
-        `<Relationship Id="${relId}" Target="slides/${baseName}.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"/></Relationships>`
-      );
-
-      const sldId = this._nextSldId++;
-      newSldIdEntries.push(`<p:sldId id="${sldId}" r:id="${relId}"/>`);
+    const relEntries = [...presRelsXml.matchAll(/<Relationship[^>]*>/g)];
+    const targetToRelId = {};
+    for (const match of relEntries) {
+      const tag = match[0];
+      const idMatch = tag.match(/Id="([^"]+)"/);
+      const targetMatch = tag.match(/Target="([^"]+)"/);
+      if (idMatch && targetMatch) {
+        const id = idMatch[1];
+        const target = targetMatch[1];
+        const baseNameMatch = target.match(/slides\/([^/.]+)\.xml$/);
+        if (baseNameMatch) {
+          targetToRelId[baseNameMatch[1]] = id;
+        }
+      }
     }
 
-    // Find the r:id of the "afterBaseName" slide part so we can splice the new sldId entries right after it.
-    const afterRelMatch = presRels.match(new RegExp(`Id="(rId\\d+)" Target="slides/${afterBaseName}\\.xml"`));
-    const afterRelId = afterRelMatch ? afterRelMatch[1] : null;
-
-    if (afterRelId) {
-      const anchorRe = new RegExp(`(<p:sldId[^>]*r:id="${afterRelId}"/>)`);
-      presentation = presentation.replace(anchorRe, `$1${newSldIdEntries.join('')}`);
-    } else {
-      presentation = presentation.replace('</p:sldIdLst>', `${newSldIdEntries.join('')}</p:sldIdLst>`);
+    const sldIdEntries = [];
+    for (const baseName of orderedBaseNames) {
+      const relId = targetToRelId[baseName];
+      if (relId) {
+        const sldId = this._nextSldId++;
+        sldIdEntries.push(`<p:sldId id="${sldId}" r:id="${relId}"/>`);
+      }
     }
 
-    this.writeText(contentTypesPath, contentTypes);
-    this.writeText('ppt/_rels/presentation.xml.rels', presRels);
-    this.writeText('ppt/presentation.xml', presentation);
+    presentationXml = presentationXml.replace(
+      /<p:sldIdLst>[\s\S]*?<\/p:sldIdLst>/,
+      `<p:sldIdLst>${sldIdEntries.join('')}</p:sldIdLst>`
+    );
+
+    this.writeText('ppt/presentation.xml', presentationXml);
   }
 
-  /** Removes a slide's <p:sldId> entry from the slide order (part stays in the zip, just unreferenced/unused). */
   async removeFromSlideOrder(baseName) {
     let presRels = await this.readText('ppt/_rels/presentation.xml.rels');
     let presentation = await this.readText('ppt/presentation.xml');
 
-    const relMatch = presRels.match(new RegExp(`Id="(rId\\d+)" Target="slides/${baseName}\\.xml"`));
+    const relMatch = presRels.match(new RegExp(`Id="(rId\\d+)"[^>]*Target="(?:/ppt/)?slides/${baseName}\\.xml"`)) ||
+                     presRels.match(new RegExp(`Target="(?:/ppt/)?slides/${baseName}\\.xml"[^>]*Id="(rId\\d+)"`));
     if (!relMatch) return;
     const relId = relMatch[1];
-    presentation = presentation.replace(new RegExp(`<p:sldId[^>]*r:id="${relId}"/>`), '');
+    presentation = presentation.replace(new RegExp(`<p:sldId[^>]*r:id="${relId}"[^/>]*/>`), '');
     this.writeText('ppt/presentation.xml', presentation);
   }
 
@@ -149,4 +234,4 @@ class PptxTemplate {
   }
 }
 
-module.exports = { PptxTemplate, SITE_SPEC_TEMPLATE, SITE_MAP_TEMPLATE, THANK_YOU_SLIDE, extOf };
+module.exports = { PptxTemplate, extOf };
