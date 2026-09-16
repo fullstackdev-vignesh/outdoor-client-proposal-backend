@@ -1,5 +1,13 @@
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Plain 'YYYY-MM-DD' for "today" in IST calendar terms — matches how the rest of the
+// backend stamps dates (nowIST()) so a straight string comparison against a booking's
+// plain YYYY-MM-DD startDate never drifts across a UTC/local boundary.
+function todayDateOnly() {
+  return new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
+}
 
 function calcDurationDays(startDate, endDate) {
   const start = new Date(startDate);
@@ -39,4 +47,4 @@ function findOverlappingBooking(bookings, newStart, newEnd, excludeBookingId) {
   });
 }
 
-module.exports = { calcDurationDays, calcBookingAmount, formatDateLabel, findOverlappingBooking };
+module.exports = { calcDurationDays, calcBookingAmount, formatDateLabel, findOverlappingBooking, todayDateOnly };

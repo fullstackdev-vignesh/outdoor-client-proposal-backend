@@ -3,7 +3,7 @@ const ExcelJS = require('exceljs');
 const Site = require('../models/Site');
 const SiteHistory = require('../models/SiteHistory');
 const { saveMediaImage } = require('../utils/imageStorage');
-const { calcDurationDays, calcBookingAmount, formatDateLabel, findOverlappingBooking } = require('../utils/bookingCalc');
+const { calcDurationDays, calcBookingAmount, formatDateLabel, findOverlappingBooking, todayDateOnly } = require('../utils/bookingCalc');
 const { formatIST } = require('../utils/formatDate');
 const InventoryHistory = require('../models/InventoryHistory');
 const { recordStatusPeriod, buildOverlapFilter } = require('../services/inventoryTimeline');
@@ -211,6 +211,9 @@ function buildBookingRecord(site, input, userId, existingBooking) {
   if (!client) throw new Error('Customer is required');
   if (!startDate || !endDate) throw new Error('Start Date and End Date are required');
   if (new Date(endDate) < new Date(startDate)) throw new Error('End Date must be on or after Start Date');
+  // Only a brand-new booking is floored at today — editing an already-saved booking (it
+  // has an existingBooking record) keeps its own historical start date valid.
+  if (!existingBooking && startDate < todayDateOnly()) throw new Error('Start Date cannot be before today.');
 
   const overlap = findOverlappingBooking(site.bookings, startDate, endDate, existingBooking?.bookingId);
   if (overlap) {
@@ -275,6 +278,9 @@ function buildBookingsArray(site, incomingBookings, userId) {
     if (!input.client) throw new Error('Customer is required for every booking');
     if (!input.startDate || !input.endDate) throw new Error('Start Date and End Date are required for every booking');
     if (new Date(input.endDate) < new Date(input.startDate)) throw new Error('End Date must be on or after Start Date');
+    // Only a brand-new booking (no matching existing record) is floored at today — an
+    // already-saved booking round-tripping through this array keeps its historical date.
+    if (!existing && input.startDate < todayDateOnly()) throw new Error('Start Date cannot be before today.');
 
     const durationDays = calcDurationDays(input.startDate, input.endDate);
     const monthlyTotalCost = site.totalCost || site.monthlyAmount || 0;
