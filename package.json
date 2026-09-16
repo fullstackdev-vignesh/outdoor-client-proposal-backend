@@ -10,7 +10,8 @@
     "seed": "node src/seed.js",
     "seed:locations": "node src/scripts/seedLocations.js",
     "backfill:computed": "node src/scripts/backfillComputedFields.js",
-    "backfill:timeline": "node src/scripts/backfillInventoryHistory.js"
+    "backfill:timeline": "node src/scripts/backfillInventoryHistory.js",
+    "test": "vitest run"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1131.0",
@@ -28,6 +29,8 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "nodemon": "^3.1.4"
+    "nodemon": "^3.1.4",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1"
   }
 }
