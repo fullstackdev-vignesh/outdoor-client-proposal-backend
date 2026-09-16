@@ -1,35 +1,14 @@
 const fs = require('fs');
 const path = require('path');
-const { PptxTemplate, extOf } = require('./pptxTemplateEngine');
+const { PptxTemplate } = require('./pptxTemplateEngine');
 const { generateExcelFromTemplate } = require('./excelTemplateEngine');
 const { getRouteMapBuffer } = require('./mapService');
 const { uploadFile } = require('./storageService');
+const { getImageBuffer } = require('./mediaImage');
+const { resolveGenerator } = require('./pptGenerators');
 const PPTTemplate = require('../models/PPTTemplate');
 
 const BACKEND_ROOT = path.join(__dirname, '..', '..');
-
-async function getImageBuffer(image) {
-  if (!image) return null;
-  if (!/^https?:\/\//i.test(image)) {
-    const abs = path.join(BACKEND_ROOT, image.replace(/^\//, ''));
-    if (fs.existsSync(abs)) {
-      return { buffer: fs.readFileSync(abs), ext: extOf(abs) || 'jpg' };
-    }
-    return null;
-  }
-  try {
-    const response = await fetch(image);
-    if (!response.ok) return null;
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    const extMatch = image.match(/\.(jpg|jpeg|png|webp|gif)(?:\?|$)/i);
-    const ext = extMatch ? extMatch[1].toLowerCase() : 'jpg';
-    return { buffer, ext };
-  } catch (err) {
-    console.error('Failed to download media image:', image, err.message);
-    return null;
-  }
-}
 
 function customerLabel(proposal) {
   const client = proposal.client || {};
@@ -41,16 +20,30 @@ function formatDisplayDate(date) {
 }
 
 async function generateProposalPpt(proposal) {
+  let templateName = null;
   let templateFileUrl = null;
   if (proposal.pptTemplate) {
-    if (typeof proposal.pptTemplate === 'object' && proposal.pptTemplate.fileUrl) {
+    if (typeof proposal.pptTemplate === 'object' && proposal.pptTemplate._id) {
+      templateName = proposal.pptTemplate.name;
       templateFileUrl = proposal.pptTemplate.fileUrl;
-    } else if (typeof proposal.pptTemplate === 'string') {
+    } else {
       const tplDoc = await PPTTemplate.findById(proposal.pptTemplate);
-      if (tplDoc) templateFileUrl = tplDoc.fileUrl;
+      if (tplDoc) {
+        templateName = tplDoc.name;
+        templateFileUrl = tplDoc.fileUrl;
+      }
     }
   }
 
+  const customGenerator = resolveGenerator(templateName);
+  const buffer = customGenerator
+    ? await customGenerator({ proposal, client: proposal.client || {}, sites: proposal.sites || [] })
+    : await generateLegacyPptBuffer(proposal, templateFileUrl);
+
+  return uploadPptBuffer(proposal, buffer);
+}
+
+async function generateLegacyPptBuffer(proposal, templateFileUrl) {
   const tpl = await PptxTemplate.load(templateFileUrl);
   const client = proposal.client || {};
   const sites = proposal.sites || [];
@@ -161,11 +154,12 @@ async function generateProposalPpt(proposal) {
     await tpl.setFinalSlideOrder(['slide1', ...insertedBaseNames]);
   }
 
-  const buffer = await tpl.save();
+  return tpl.save();
+}
 
-  let pptUrl;
+async function uploadPptBuffer(proposal, buffer) {
   try {
-    pptUrl = await uploadFile(
+    return await uploadFile(
       buffer,
       `${proposal.proposalId}.pptx`,
       'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -177,10 +171,8 @@ async function generateProposalPpt(proposal) {
     fs.mkdirSync(localDir, { recursive: true });
     const localPath = path.join(localDir, `${proposal.proposalId}.pptx`);
     fs.writeFileSync(localPath, buffer);
-    pptUrl = `/uploads/generated/${proposal.proposalId}.pptx`;
+    return `/uploads/generated/${proposal.proposalId}.pptx`;
   }
-
-  return pptUrl;
 }
 
 function generateProposalExcel(proposal) {
