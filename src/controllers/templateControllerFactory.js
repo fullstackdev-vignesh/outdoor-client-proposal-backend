@@ -22,7 +22,7 @@ function makeTemplateController(Model) {
   const create = asyncHandler(async (req, res) => {
     const payload = { ...req.body, createdBy: req.user._id };
     if (req.file) {
-      payload.fileUrl = saveTemplateFile(req.file);
+      payload.fileUrl = await saveTemplateFile(req.file);
     }
     const item = await Model.create(payload);
     res.status(201).json(item);
@@ -35,7 +35,7 @@ function makeTemplateController(Model) {
       throw new Error('Template not found');
     }
     if (req.file) {
-      req.body.fileUrl = saveTemplateFile(req.file);
+      req.body.fileUrl = await saveTemplateFile(req.file);
     }
     Object.assign(item, req.body);
     await item.save();
@@ -66,4 +66,5 @@ function makeTemplateController(Model) {
   return { getAll, getOne, create, update, remove, setStatus };
 }
 
+module.exports = makeTemplateFactory = makeTemplateController;
 module.exports = makeTemplateController;

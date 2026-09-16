@@ -33,14 +33,30 @@ class PptxTemplate {
   }
 
   static async load(customPath) {
-    let targetPath = MASTER_PPTX_PATH;
-    if (customPath) {
-      const absCustom = path.resolve(BACKEND_ROOT, customPath.replace(/^\//, ''));
-      if (fs.existsSync(absCustom)) {
-        targetPath = absCustom;
+    let buf;
+    if (customPath && /^https?:\/\//i.test(customPath)) {
+      try {
+        const response = await fetch(customPath);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch template from URL: ${customPath} (${response.status})`);
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        buf = Buffer.from(arrayBuffer);
+      } catch (err) {
+        console.warn('Failed to fetch remote template, falling back to master.pptx:', err.message);
+        buf = fs.readFileSync(MASTER_PPTX_PATH);
       }
+    } else {
+      let targetPath = MASTER_PPTX_PATH;
+      if (customPath) {
+        const absCustom = path.resolve(BACKEND_ROOT, customPath.replace(/^\//, ''));
+        if (fs.existsSync(absCustom)) {
+          targetPath = absCustom;
+        }
+      }
+      buf = fs.existsSync(targetPath) ? fs.readFileSync(targetPath) : fs.readFileSync(MASTER_PPTX_PATH);
     }
-    const buf = fs.readFileSync(targetPath);
+
     const zip = await JSZip.loadAsync(buf);
     const tpl = new PptxTemplate(zip);
     await tpl.ensureImageDefaults();

@@ -3,14 +3,10 @@ const path = require('path');
 const { PptxTemplate, extOf } = require('./pptxTemplateEngine');
 const { generateExcelFromTemplate } = require('./excelTemplateEngine');
 const { getRouteMapBuffer } = require('./mapService');
+const { uploadFile } = require('./storageService');
+const PPTTemplate = require('../models/PPTTemplate');
 
-const GENERATED_DIR = path.join(__dirname, '..', '..', 'generated');
 const BACKEND_ROOT = path.join(__dirname, '..', '..');
-
-function ensureGeneratedDir() {
-  fs.mkdirSync(GENERATED_DIR, { recursive: true });
-  return GENERATED_DIR;
-}
 
 async function getImageBuffer(image) {
   if (!image) return null;
@@ -45,11 +41,17 @@ function formatDisplayDate(date) {
 }
 
 async function generateProposalPpt(proposal) {
-  const dir = ensureGeneratedDir();
-  const filePath = path.join(dir, `${proposal.proposalId}.pptx`);
+  let templateFileUrl = null;
+  if (proposal.pptTemplate) {
+    if (typeof proposal.pptTemplate === 'object' && proposal.pptTemplate.fileUrl) {
+      templateFileUrl = proposal.pptTemplate.fileUrl;
+    } else if (typeof proposal.pptTemplate === 'string') {
+      const tplDoc = await PPTTemplate.findById(proposal.pptTemplate);
+      if (tplDoc) templateFileUrl = tplDoc.fileUrl;
+    }
+  }
 
-  const pptTemplateObj = proposal.pptTemplate || {};
-  const tpl = await PptxTemplate.load(pptTemplateObj.fileUrl);
+  const tpl = await PptxTemplate.load(templateFileUrl);
   const client = proposal.client || {};
   const sites = proposal.sites || [];
 
@@ -59,41 +61,21 @@ async function generateProposalPpt(proposal) {
   });
 
   const slideFiles = await tpl.getSlideFiles();
-  const coverTpl = slideFiles[0] || 'slide1';
+  const coverTpl = 'slide1';
+  const cityDividerTpl = slideFiles.find((f) => f === 'slide2') || (slideFiles.length >= 2 ? slideFiles[1] : 'slide1');
+  const siteSpecTpl = slideFiles.find((f) => f === 'slide3') || (slideFiles.length >= 3 ? slideFiles[2] : cityDividerTpl);
+  const siteMapTpl = slideFiles.find((f) => f === 'slide4') || (slideFiles.length >= 4 ? slideFiles[3] : null);
 
-  // Read text content from each slide to dynamically identify roles
-  const slideTexts = {};
-  for (const sf of slideFiles) {
-    const xml = await tpl.readText(`ppt/slides/${sf}.xml`);
-    const texts = [...xml.matchAll(/<a:t>([^<]+)<\/a:t>/g)].map((m) => m[1].trim()).filter(Boolean);
-    slideTexts[sf] = texts;
-  }
-
-  let cityDividerTpl = null;
-  let siteSpecTpl = null;
-  let siteMapTpl = null;
-  let thankYouTpl = null;
+  const keptTemplates = new Set([coverTpl, cityDividerTpl, siteSpecTpl]);
+  if (siteMapTpl) keptTemplates.add(siteMapTpl);
 
   for (const sf of slideFiles) {
-    const txts = slideTexts[sf].join(' ').toLowerCase();
-    if (!cityDividerTpl && (sf === 'slide2' || txts.includes('chennai') || txts.includes('madurai') || txts.includes('city'))) {
-      cityDividerTpl = sf;
-    }
-    if (!siteSpecTpl && (txts.includes('duration') || txts.includes('media type') || txts.includes('illumination') || txts.includes('flyover') || txts.includes('bridge') || txts.includes('hoarding') || txts.includes('unipole') || txts.includes('40x30'))) {
-      siteSpecTpl = sf;
-    }
-    if (!siteMapTpl && (txts.includes('route map') || txts.includes('distance') || txts.includes('map'))) {
-      siteMapTpl = sf;
-    }
-    if (txts.includes('thank you') || txts.includes('thanks') || txts.includes('awaiting your approval') || txts.includes('with regards')) {
-      thankYouTpl = sf;
+    if (!keptTemplates.has(sf)) {
+      await tpl.removeFromSlideOrder(sf);
     }
   }
 
-  if (!cityDividerTpl && slideFiles.length >= 2) cityDividerTpl = slideFiles[1];
-  if (!siteSpecTpl && slideFiles.length >= 3) siteSpecTpl = slideFiles[2];
-
-  // Group requested proposal sites by city
+  // Group sites by city
   const sitesByCity = {};
   for (const site of sites) {
     const city = site.city || 'Other';
@@ -101,35 +83,27 @@ async function generateProposalPpt(proposal) {
     sitesByCity[city].push(site);
   }
 
-  const finalOrderedSlides = [coverTpl];
+  const insertedBaseNames = [];
 
   for (const [city, citySites] of Object.entries(sitesByCity)) {
-    const stateName = citySites[0]?.state || client?.state || 'Tamil Nadu';
+    // 1. Clone City Divider Slide
+    const cityDividerBase = await tpl.cloneSlide(
+      cityDividerTpl,
+      {
+        textReplacements: [
+          ['Chennai', city],
+          ['Madurai', city],
+          ['Tamil Nadu', proposal.client?.state || 'Tamil Nadu'],
+        ],
+      },
+      { city }
+    );
+    insertedBaseNames.push(cityDividerBase);
 
-    // 1. City / State Divider Slide
-    if (cityDividerTpl) {
-      const cityDividerBase = await tpl.cloneSlide(
-        cityDividerTpl,
-        {
-          textReplacements: [
-            ['Chennai', city],
-            ['Madurai', city],
-            ['Tamil Nadu', stateName],
-            ['City:', `City: ${city}`],
-            ['State:', `State: ${stateName}`],
-          ],
-        },
-        { city, state: stateName }
-      );
-      finalOrderedSlides.push(cityDividerBase);
-    }
-
-    // 2. Site Spec Slide for each requested site
+    // 2. Clone Site Specs for each site in this city
     for (const site of citySites) {
-      const siteImage = await getImageBuffer(site.image || site.mediaImage);
+      const siteImage = await getImageBuffer(site.mediaImage);
       const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
-      const durationLabel = site.bookingInfo?.durationDays ? `${site.bookingInfo.durationDays} Days` : '30 Days';
-
       const specTextReplacements = [
         ['Chennai', site.city || '-'],
         ['Madurai', site.city || '-'],
@@ -144,7 +118,6 @@ async function generateProposalPpt(proposal) {
         ['40x30', sizeLabel || '-'],
         ['40x20', sizeLabel || '-'],
         ['50x30', sizeLabel || '-'],
-        ['30 Days', durationLabel],
         ['1', String(site.quantity || 1)],
       ];
 
@@ -156,7 +129,7 @@ async function generateProposalPpt(proposal) {
         },
         site
       );
-      finalOrderedSlides.push(specBase);
+      insertedBaseNames.push(specBase);
 
       const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
       if (hasCoords && siteMapTpl) {
@@ -178,28 +151,39 @@ async function generateProposalPpt(proposal) {
             },
             site
           );
-          finalOrderedSlides.push(mapBase);
+          insertedBaseNames.push(mapBase);
         }
       }
     }
   }
 
-  // 3. Append Thank You slide at the very end
-  if (thankYouTpl && thankYouTpl !== coverTpl) {
-    finalOrderedSlides.push(thankYouTpl);
+  if (insertedBaseNames.length) {
+    await tpl.setFinalSlideOrder(['slide1', ...insertedBaseNames]);
   }
 
-  // Set the exact final slide list in presentation.xml (removes all dummy template slides)
-  await tpl.setFinalSlideOrder(finalOrderedSlides);
-
   const buffer = await tpl.save();
-  fs.writeFileSync(filePath, buffer);
-  return `/generated/${path.basename(filePath)}`;
+
+  let pptUrl;
+  try {
+    pptUrl = await uploadFile(
+      buffer,
+      `${proposal.proposalId}.pptx`,
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'generated'
+    );
+  } catch (spaceErr) {
+    console.warn('Cloud storage upload failed for PPT, falling back to local storage:', spaceErr.message);
+    const localDir = path.join(BACKEND_ROOT, 'uploads', 'generated');
+    fs.mkdirSync(localDir, { recursive: true });
+    const localPath = path.join(localDir, `${proposal.proposalId}.pptx`);
+    fs.writeFileSync(localPath, buffer);
+    pptUrl = `/uploads/generated/${proposal.proposalId}.pptx`;
+  }
+
+  return pptUrl;
 }
 
 function generateProposalExcel(proposal) {
-  const dir = ensureGeneratedDir();
-  const filePath = path.join(dir, `${proposal.proposalId}.xlsx`);
   const client = proposal.client || {};
 
   const rows = (proposal.sites || []).map((s, i) => ({
@@ -217,9 +201,24 @@ function generateProposalExcel(proposal) {
     vendorCost: client.vendorCost || 0,
   }));
 
-  return generateExcelFromTemplate(rows).then((buffer) => {
-    fs.writeFileSync(filePath, buffer);
-    return `/generated/${path.basename(filePath)}`;
+  return generateExcelFromTemplate(rows).then(async (buffer) => {
+    let excelUrl;
+    try {
+      excelUrl = await uploadFile(
+        buffer,
+        `${proposal.proposalId}.xlsx`,
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'generated'
+      );
+    } catch (spaceErr) {
+      console.warn('Cloud storage upload failed for Excel, falling back to local storage:', spaceErr.message);
+      const localDir = path.join(BACKEND_ROOT, 'uploads', 'generated');
+      fs.mkdirSync(localDir, { recursive: true });
+      const localPath = path.join(localDir, `${proposal.proposalId}.xlsx`);
+      fs.writeFileSync(localPath, buffer);
+      excelUrl = `/uploads/generated/${proposal.proposalId}.xlsx`;
+    }
+    return excelUrl;
   });
 }
 

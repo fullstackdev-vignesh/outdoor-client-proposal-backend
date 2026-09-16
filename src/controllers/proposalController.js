@@ -119,10 +119,16 @@ const generatePpt = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error('Proposal not found');
   }
-  proposal.generatedPptUrl = await generateProposalPpt(proposal);
-  proposal.status = proposal.generatedExcelUrl ? 'completed' : 'generated';
-  await proposal.save();
-  res.json(proposal);
+  try {
+    proposal.generatedPptUrl = await generateProposalPpt(proposal);
+    proposal.status = proposal.generatedExcelUrl ? 'completed' : 'generated';
+    await proposal.save();
+    res.json(proposal);
+  } catch (err) {
+    console.error('generatePpt error:', err);
+    res.status(500);
+    throw new Error(`Failed to generate PPT: ${err.message}`);
+  }
 });
 
 const generateExcel = asyncHandler(async (req, res) => {
@@ -134,10 +140,16 @@ const generateExcel = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error('Proposal not found');
   }
-  proposal.generatedExcelUrl = await generateProposalExcel(proposal);
-  proposal.status = proposal.generatedPptUrl ? 'completed' : 'generated';
-  await proposal.save();
-  res.json(proposal);
+  try {
+    proposal.generatedExcelUrl = await generateProposalExcel(proposal);
+    proposal.status = proposal.generatedPptUrl ? 'completed' : 'generated';
+    await proposal.save();
+    res.json(proposal);
+  } catch (err) {
+    console.error('generateExcel error:', err);
+    res.status(500);
+    throw new Error(`Failed to generate Excel: ${err.message}`);
+  }
 });
 
 module.exports = {
