@@ -99,10 +99,57 @@ async function generateProposalPpt(proposal) {
   });
 
   if (isAdinnNewTemplate) {
-    // adinn-new-template: only slide 1's date is patched for now. Slides 2, 3 and beyond
-    // are left exactly as in the reference file — no per-city/per-site cloning yet
-    // (rules for the remaining slides will be added in a later change).
+    // adinn-new-template: slide 1 date/name, slides 2-3 preserved as-is (implemented earlier).
+    // Slides 4 (site specification) and 5 (site + map) are cloned once per selected site, in
+    // selection order; the final/remaining slides (6+) are left exactly as in the reference
+    // file and appended after all the per-site pairs (their own rules come in a later change).
     await tpl.setCoverDateLabel(formatDisplayDate(now));
+
+    const slideFiles = await tpl.getSlideFiles();
+    const remainingSlides = slideFiles.filter((f) => !['slide1', 'slide2', 'slide3', 'slide4', 'slide5'].includes(f));
+
+    const siteSlideBaseNames = [];
+    for (const site of sites) {
+      const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
+      const titleText = `${site.location || site.areaName || site.mediaName || site.city || ''} ${sizeLabel}`.trim();
+      const siteImage = await getImageBuffer(site.mediaImage);
+      const titleReplacement = ['Periyanayakanpalayam bridge towards Mettupalayam 40x30', titleText];
+
+      // Slide 4 — site specification: title, bordered site-photo box, media spec values.
+      // Only the bordered foreground photo box (rId6) gets the site photo — the full-bleed
+      // background shape (rId2) stays exactly as in the reference file, since that's what
+      // renders as the plain white backdrop behind the Media Specifications panel.
+      const slide4Base = await tpl.cloneAdinnSiteSlide('slide4', {
+        textReplacements: [
+          titleReplacement,
+          ['Chennai', site.city || '-'],
+          ['40x30', sizeLabel || '-'],
+          ['Hoarding', site.mediaType || '-'],
+          ['Frontlit', site.illumination || '-'],
+          ['1', site.sizeUnit || '-'],
+        ],
+        images: siteImage ? [{ relId: 'rId6', ...siteImage, boxWidthEMU: 11366193, boxHeightEMU: 7736815 }] : [],
+      });
+      siteSlideBaseNames.push(slide4Base);
+
+      // Slide 5 — site + map: title, bordered site-photo box, map image cleared to a placeholder.
+      // Same reasoning as slide 4: leave the full-bleed background (rId2) untouched.
+      const slide5Base = await tpl.cloneAdinnSiteSlide('slide5', {
+        textReplacements: [titleReplacement],
+        images: siteImage ? [{ relId: 'rId9', ...siteImage, boxWidthEMU: 10484172, boxHeightEMU: 7646052 }] : [],
+        clearImageRelId: 'rId5',
+        placeholderText: {
+          offX: 11605227,
+          offY: 1587800,
+          extCx: 6508010,
+          extCy: 7646052,
+          text: 'Insert your map image here',
+        },
+      });
+      siteSlideBaseNames.push(slide5Base);
+    }
+
+    await tpl.setFinalSlideOrder(['slide1', 'slide2', 'slide3', ...siteSlideBaseNames, ...remainingSlides]);
 
     const buffer = await tpl.save();
     const clientNameSafe = sanitizePathSegment(client.name);

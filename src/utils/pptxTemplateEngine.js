@@ -13,6 +13,48 @@ function extOf(filename) {
   return path.extname(filename).replace('.', '').toLowerCase();
 }
 
+// Minimal, dependency-free width/height reader for the two formats site photos use in practice.
+function getImageDimensions(buffer, ext) {
+  try {
+    if (/^png$/i.test(ext) && buffer.length >= 24 && buffer.readUInt32BE(0) === 0x89504e47) {
+      return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+    }
+    if (/^jpe?g$/i.test(ext) && buffer[0] === 0xff && buffer[1] === 0xd8) {
+      let i = 2;
+      while (i + 9 < buffer.length) {
+        if (buffer[i] !== 0xff) {
+          i++;
+          continue;
+        }
+        const marker = buffer[i + 1];
+        if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+          return { height: buffer.readUInt16BE(i + 5), width: buffer.readUInt16BE(i + 7) };
+        }
+        i += 2 + buffer.readUInt16BE(i + 2);
+      }
+    }
+  } catch {
+    // fall through to null below
+  }
+  return null;
+}
+
+// "object-fit: cover" style crop, expressed as OOXML <a:fillRect> insets (thousandths of a percent).
+function computeCoverFillRect(srcW, srcH, boxW, boxH) {
+  if (!srcW || !srcH || !boxW || !boxH) return { l: 0, t: 0, r: 0, b: 0 };
+  const srcAR = srcW / srcH;
+  const boxAR = boxW / boxH;
+  if (srcAR > boxAR) {
+    const crop = Math.round(((1 - boxAR / srcAR) / 2) * 100000);
+    return { l: crop, t: 0, r: crop, b: 0 };
+  }
+  if (srcAR < boxAR) {
+    const crop = Math.round(((1 - srcAR / boxAR) / 2) * 100000);
+    return { l: 0, t: crop, r: 0, b: crop };
+  }
+  return { l: 0, t: 0, r: 0, b: 0 };
+}
+
 function removeRedHighlightShapes(slideXml) {
   const spRegex = /<p:sp\b[^>]*>[\s\S]*?<\/p:sp>/g;
   return slideXml.replace(spRegex, (match) => {
@@ -156,13 +198,18 @@ class PptxTemplate {
       }
     }
 
+    return this._registerClonedSlide(slideXml, relsXml);
+  }
+
+  // Shared by cloneSlide/cloneAdinnSiteSlide: writes the new slide+rels parts and registers
+  // them in [Content_Types].xml and presentation.xml.rels so they show up as real slides.
+  async _registerClonedSlide(slideXml, relsXml) {
     const newBaseName = `slide_gen_${this._nextSlideIndex++}`;
     const newSlidePath = `ppt/slides/${newBaseName}.xml`;
     const newRelsPath = `ppt/slides/_rels/${newBaseName}.xml.rels`;
     this.writeText(newSlidePath, slideXml);
     this.writeText(newRelsPath, relsXml);
 
-    // Register relationship and content type for the cloned slide
     const newRelId = `rIdGen${this._nextRelId++}`;
     const contentTypesPath = '[Content_Types].xml';
     let contentTypes = await this.readText(contentTypesPath);
@@ -183,6 +230,57 @@ class PptxTemplate {
     this.writeText('ppt/_rels/presentation.xml.rels', presRels);
 
     return newBaseName;
+  }
+
+  // adinn-new-template slide 4/5 cloning: exact text swaps, plus per-relationship-id image
+  // replacement that also recomputes that shape's <a:fillRect> crop so the new photo covers
+  // its existing box without stretching (aspect-fit "cover", not distort-to-fill).
+  // images: [{ relId, buffer, ext, boxWidthEMU, boxHeightEMU }]
+  // clearImageRelId: relationship id whose blipFill should become empty (map placeholder)
+  // placeholderText: { offX, offY, extCx, extCy, text } — new centered textbox for that empty area
+  async cloneAdinnSiteSlide(templateBaseName, { textReplacements = [], images = [], clearImageRelId, placeholderText } = {}) {
+    const slidePath = `ppt/slides/${templateBaseName}.xml`;
+    const relsPath = `ppt/slides/_rels/${templateBaseName}.xml.rels`;
+
+    let slideXml = await this.readText(slidePath);
+    let relsXml = await this.readText(relsPath);
+
+    for (const [oldText, newText] of textReplacements) {
+      const target = `<a:t>${oldText}</a:t>`;
+      if (slideXml.includes(target)) {
+        slideXml = slideXml.replace(target, `<a:t>${xmlEscape(newText)}</a:t>`);
+      }
+    }
+
+    for (const { relId, buffer, ext, boxWidthEMU, boxHeightEMU } of images) {
+      if (!buffer) continue;
+      const newTarget = await this.addMediaFile(buffer, ext);
+      relsXml = this.replaceRelTarget(relsXml, relId, newTarget);
+
+      const dims = getImageDimensions(buffer, ext);
+      const rect = dims ? computeCoverFillRect(dims.width, dims.height, boxWidthEMU, boxHeightEMU) : { l: 0, t: 0, r: 0, b: 0 };
+      const fillRectRe = new RegExp(`(<a:blip r:embed="${relId}"\\/><a:stretch><a:fillRect) l="-?\\d+" t="-?\\d+" r="-?\\d+" b="-?\\d+"(\\/>)`);
+      slideXml = slideXml.replace(fillRectRe, `$1 l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"$2`);
+    }
+
+    if (clearImageRelId) {
+      const clearRe = new RegExp(`<a:blipFill><a:blip r:embed="${clearImageRelId}"\\/><a:stretch>.*?<\\/a:stretch><\\/a:blipFill>`);
+      slideXml = slideXml.replace(clearRe, '<a:noFill/>');
+    }
+
+    if (placeholderText) {
+      const { offX, offY, extCx, extCy, text } = placeholderText;
+      const shapeId = 9000 + this._nextSlideIndex;
+      const placeholderSp =
+        `<p:sp><p:nvSpPr><p:cNvPr name="Map Placeholder" id="${shapeId}"/><p:cNvSpPr txBox="true"/><p:nvPr/></p:nvSpPr>` +
+        `<p:spPr><a:xfrm><a:off x="${offX}" y="${offY}"/><a:ext cx="${extCx}" cy="${extCy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>` +
+        `<p:txBody><a:bodyPr anchor="ctr" wrap="square"><a:normAutofit/></a:bodyPr><a:lstStyle/><a:p><a:pPr algn="ctr"/>` +
+        `<a:r><a:rPr lang="en-US" sz="2400"><a:solidFill><a:srgbClr val="666666"/></a:solidFill><a:latin typeface="Times New Roman MT"/></a:rPr><a:t>${xmlEscape(text)}</a:t></a:r>` +
+        `</a:p></p:txBody></p:sp>`;
+      slideXml = slideXml.replace('</p:spTree>', `${placeholderSp}</p:spTree>`);
+    }
+
+    return this._registerClonedSlide(slideXml, relsXml);
   }
 
   async setCoverFields({ customerLabel, dateLabel }) {
