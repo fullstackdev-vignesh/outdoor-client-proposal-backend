@@ -2,9 +2,11 @@ const fs = require('fs');
 const path = require('path');
 const { PptxTemplate, extOf } = require('./pptxTemplateEngine');
 const { generateExcelFromTemplate } = require('./excelTemplateEngine');
+const { getExcelConfig } = require('../config/excelTemplateConfigs');
 const { getRouteMapBuffer } = require('./mapService');
 const { uploadFile } = require('./storageService');
 const PPTTemplate = require('../models/PPTTemplate');
+const ExcelTemplate = require('../models/ExcelTemplate');
 
 const BACKEND_ROOT = path.join(__dirname, '..', '..');
 
@@ -183,43 +185,76 @@ async function generateProposalPpt(proposal) {
   return pptUrl;
 }
 
-function generateProposalExcel(proposal) {
-  const client = proposal.client || {};
-
-  const rows = (proposal.sites || []).map((s, i) => ({
-    siNo: i + 1,
-    city: s.city,
-    media: s.mediaId,
-    location: s.location || s.areaName || '',
-    qty: s.quantity || 1,
-    width: s.width || 0,
-    height: s.height || 0,
-    type: s.illumination || '',
-    displayCostPerMonth: s.monthlyAmount || 0,
-    siteStatus: s.mediaStatus ? s.mediaStatus.charAt(0).toUpperCase() + s.mediaStatus.slice(1) : '',
+function buildExcelRow(site, index, client) {
+  return {
+    siNo: index + 1,
+    state: site.state || '',
+    city: site.city || '',
+    media: site.mediaId || '',
+    location: site.location || site.areaName || '',
+    qty: site.quantity || 1,
+    width: site.width || 0,
+    height: site.height || 0,
+    type: site.illumination || '',
+    durationDays: site.bookingInfo?.durationDays || '',
+    displayCostPerMonth: site.monthlyAmount || 0,
+    printingCost: site.printingCost || 0,
+    mountingCost: site.mountingCost || 0,
+    siteStatus: site.mediaStatus ? site.mediaStatus.charAt(0).toUpperCase() + site.mediaStatus.slice(1) : '',
     vendorName: client.vendorName || '',
     vendorCost: client.vendorCost || 0,
-  }));
+  };
+}
 
-  return generateExcelFromTemplate(rows).then(async (buffer) => {
-    let excelUrl;
-    try {
-      excelUrl = await uploadFile(
-        buffer,
-        `${proposal.proposalId}.xlsx`,
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'generated'
-      );
-    } catch (spaceErr) {
-      console.warn('Cloud storage upload failed for Excel, falling back to local storage:', spaceErr.message);
-      const localDir = path.join(BACKEND_ROOT, 'uploads', 'generated');
-      fs.mkdirSync(localDir, { recursive: true });
-      const localPath = path.join(localDir, `${proposal.proposalId}.xlsx`);
-      fs.writeFileSync(localPath, buffer);
-      excelUrl = `/uploads/generated/${proposal.proposalId}.xlsx`;
+async function resolveExcelTemplate(proposal) {
+  let tplDoc = null;
+  if (proposal.excelTemplate) {
+    if (typeof proposal.excelTemplate === 'object' && proposal.excelTemplate.fileUrl) {
+      tplDoc = proposal.excelTemplate;
+    } else if (typeof proposal.excelTemplate === 'string') {
+      tplDoc = await ExcelTemplate.findById(proposal.excelTemplate);
     }
-    return excelUrl;
-  });
+  }
+  return { fileUrl: tplDoc?.fileUrl || null, config: getExcelConfig(tplDoc?.formatKey || 'generic') };
+}
+
+async function loadTemplateBuffer(fileUrl) {
+  if (!fileUrl) return null;
+  if (/^https?:\/\//i.test(fileUrl)) {
+    const res = await fetch(fileUrl);
+    if (!res.ok) throw new Error(`Failed to fetch Excel template (${res.status})`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+  const abs = path.resolve(BACKEND_ROOT, fileUrl.replace(/^\//, ''));
+  return fs.existsSync(abs) ? fs.readFileSync(abs) : null;
+}
+
+async function generateProposalExcel(proposal) {
+  const client = proposal.client || {};
+  const rows = (proposal.sites || []).map((s, i) => buildExcelRow(s, i, client));
+
+  const { fileUrl, config } = await resolveExcelTemplate(proposal);
+  const buffer = await loadTemplateBuffer(fileUrl);
+
+  const outBuffer = await generateExcelFromTemplate(rows, { buffer: buffer || undefined, config });
+
+  let excelUrl;
+  try {
+    excelUrl = await uploadFile(
+      outBuffer,
+      `${proposal.proposalId}.xlsx`,
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'generated'
+    );
+  } catch (spaceErr) {
+    console.warn('Cloud storage upload failed for Excel, falling back to local storage:', spaceErr.message);
+    const localDir = path.join(BACKEND_ROOT, 'uploads', 'generated');
+    fs.mkdirSync(localDir, { recursive: true });
+    const localPath = path.join(localDir, `${proposal.proposalId}.xlsx`);
+    fs.writeFileSync(localPath, outBuffer);
+    excelUrl = `/uploads/generated/${proposal.proposalId}.xlsx`;
+  }
+  return excelUrl;
 }
 
 module.exports = { generateProposalPpt, generateProposalExcel };

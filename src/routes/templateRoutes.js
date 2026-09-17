@@ -14,7 +14,7 @@ function buildRouter(Model) {
   router.get('/', ctrl.getAll);
   router.get('/:id', ctrl.getOne);
   router.post('/', authorize('admin', 'tl'), upload.single('file'), ctrl.create);
-  router.put('/:id', authorize('admin', 'tl'), ctrl.update);
+  router.put('/:id', authorize('admin', 'tl'), upload.single('file'), ctrl.update);
   router.patch('/:id/status', authorize('admin', 'tl'), ctrl.setStatus);
   router.delete('/:id', authorize('admin', 'tl'), ctrl.remove);
 

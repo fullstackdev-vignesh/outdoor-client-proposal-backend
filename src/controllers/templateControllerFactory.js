@@ -66,5 +66,4 @@ function makeTemplateController(Model) {
   return { getAll, getOne, create, update, remove, setStatus };
 }
 
-module.exports = makeTemplateFactory = makeTemplateController;
 module.exports = makeTemplateController;

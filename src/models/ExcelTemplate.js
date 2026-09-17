@@ -9,6 +9,9 @@ const excelTemplateSchema = new mongoose.Schema(
     description: String,
     version: { type: String, default: '1.0' },
     fileUrl: String,
+    // Which entry in config/excelTemplateConfigs.js drives generation for this uploaded
+    // file's column layout — empty/unset falls back to the 'generic' (Adinn) mapping.
+    formatKey: { type: String, default: '', trim: true },
     status: { type: String, enum: ['active', 'inactive'], default: 'active' },
     usedCount: { type: Number, default: 0 },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
