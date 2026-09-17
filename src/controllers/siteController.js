@@ -6,7 +6,7 @@ const { saveMediaImage } = require('../utils/imageStorage');
 const { calcDurationDays, calcBookingAmount, formatDateLabel, findOverlappingBooking, todayDateOnly } = require('../utils/bookingCalc');
 const { formatIST } = require('../utils/formatDate');
 const InventoryHistory = require('../models/InventoryHistory');
-const { recordStatusPeriod, buildOverlapFilter } = require('../services/inventoryTimeline');
+const { recordStatusPeriod, buildOverlapFilter, syncBookingTimelineRecords, computeBookingLifecycle } = require('../services/inventoryTimeline');
 const { genBookingId, resolveSiteStatus } = require('../services/bookingScheduler');
 
 const IST_OFFSET_MS = 330 * 60000;
@@ -368,6 +368,7 @@ const createSite = asyncHandler(async (req, res) => {
   await site.save();
 
   await recordStatusPeriod({ site, previousStatus: null, source: 'sites', userId: req.user._id });
+  await syncBookingTimelineRecords(site, req.user._id, 'sites');
   res.status(201).json({ ...site.toObject(), mediaCode: site.mediaId });
 });
 
@@ -429,6 +430,10 @@ const updateSite = asyncHandler(async (req, res) => {
   if (statusChanged) {
     await recordStatusPeriod({ site, previousStatus: beforeStatus, source: 'sites', userId: req.user._id });
   }
+  // Unconditional (not gated by statusChanged): every booking in the array — active,
+  // upcoming or completed — must show up/refresh in Timeline as soon as it's saved, not
+  // only the one currently driving the site's live status.
+  await syncBookingTimelineRecords(site, req.user._id, 'sites');
   const changedAt = nowIST();
   await logFieldChanges(site._id, before, site.toObject(), req.user._id, changedAt);
   await logBookingChanges(site._id, beforeBookings, site.bookings, req.user._id, changedAt);
@@ -492,6 +497,7 @@ const changeStatus = asyncHandler(async (req, res) => {
     // decides which timestamp bumps (that's fully data-driven in the Site model now).
     await recordStatusPeriod({ site, previousStatus: beforeStatus, source: source === 'inventory' ? 'inventory' : 'sites', userId: req.user._id });
   }
+  await syncBookingTimelineRecords(site, req.user._id, source === 'inventory' ? 'inventory' : 'sites');
   const changedAt = nowIST();
   await logFieldChanges(site._id, before, site.toObject(), req.user._id, changedAt);
   await logBookingChanges(site._id, beforeBookings, site.bookings, req.user._id, changedAt);
@@ -544,6 +550,7 @@ const bulkChangeStatus = asyncHandler(async (req, res) => {
     if (statusChanged) {
       await recordStatusPeriod({ site, previousStatus: beforeStatus, source: 'inventory', userId: req.user._id });
     }
+    await syncBookingTimelineRecords(site, req.user._id, 'inventory');
     const changedAt = nowIST();
     await logFieldChanges(site._id, before, site.toObject(), req.user._id, changedAt);
     await logBookingChanges(site._id, beforeBookings, site.bookings, req.user._id, changedAt);
@@ -563,7 +570,7 @@ const getSiteTimeline = asyncHandler(async (req, res) => {
   const timeline = await InventoryHistory.find({ site: req.params.id })
     .sort({ effectiveFrom: 1 })
     .populate('changedBy', 'name');
-  res.json(timeline);
+  res.json(timeline.map((t) => ({ ...t.toObject(), bookingLifecycle: computeBookingLifecycle(t) })));
 });
 
 const getTimeline = asyncHandler(async (req, res) => {
@@ -571,7 +578,7 @@ const getTimeline = asyncHandler(async (req, res) => {
   const limit = Math.min(100, Number(req.query.limit) || 20);
   const filter = buildOverlapFilter(req.query);
 
-  const [items, total, distinctSites] = await Promise.all([
+  const [rows, total, distinctSites] = await Promise.all([
     InventoryHistory.find(filter)
       .sort({ effectiveFrom: -1 })
       .skip((page - 1) * limit)
@@ -580,6 +587,7 @@ const getTimeline = asyncHandler(async (req, res) => {
     InventoryHistory.countDocuments(filter),
     InventoryHistory.distinct('site', filter),
   ]);
+  const items = rows.map((t) => ({ ...t.toObject(), bookingLifecycle: computeBookingLifecycle(t) }));
 
   res.json({ items, total, distinctSiteCount: distinctSites.length, page, pages: Math.ceil(total / limit) });
 });

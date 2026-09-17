@@ -34,23 +34,13 @@ async function recordStatusPeriod({ site, previousStatus, source, userId }) {
     source,
   };
 
-  if (newStatus === 'booked' && site.bookingInfo) {
-    let customerName;
-    if (site.bookingInfo.client) {
-      const client = await Client.findById(site.bookingInfo.client).select('name');
-      customerName = client?.name;
-    }
-    doc.bookingSnapshot = {
-      customerType: site.bookingInfo.customerType,
-      client: site.bookingInfo.client,
-      customerName,
-      startDate: site.bookingInfo.startDate,
-      endDate: site.bookingInfo.endDate,
-      durationDays: site.bookingInfo.durationDays,
-      monthlyTotalCost: site.bookingInfo.monthlyTotalCost,
-      amount: site.bookingInfo.amount,
-    };
-  } else if (newStatus === 'blocked' && site.blockInfo) {
+  // Every booking (current, upcoming or completed) gets its own Timeline row via
+  // syncBookingTimelineRecords, called unconditionally on every save — so a 'booked' row
+  // here would just duplicate whichever booking happens to be live right now. Still run the
+  // open-period-closing update above (e.g. closing an 'available' row when a booking starts).
+  if (newStatus === 'booked') return;
+
+  if (newStatus === 'blocked' && site.blockInfo) {
     doc.blockSnapshot = {
       reason: site.blockInfo.reason,
       notes: site.blockInfo.notes,
@@ -59,6 +49,71 @@ async function recordStatusPeriod({ site, previousStatus, source, userId }) {
   }
 
   await InventoryHistory.create(doc);
+}
+
+// Upserts ONE Timeline row per non-cancelled booking in `site.bookings`, keyed by
+// (site, bookingId) — independent of whichever booking is currently "live". This is what
+// makes an Upcoming booking (e.g. starting next month) visible in Inventory Timeline the
+// moment it's saved, without waiting for its Start Date, and without disturbing the site's
+// live mediaStatus (computed separately by bookingScheduler.resolveSiteStatus). Called
+// unconditionally after every save that touches bookings, so editing a booking's dates just
+// updates its existing row in place instead of creating a new one.
+async function syncBookingTimelineRecords(site, userId, source) {
+  const now = nowIST();
+  const bookings = (site.bookings || []).filter((b) => b.status !== 'cancelled');
+  for (const b of bookings) {
+    let customerName = b.customerName;
+    if (!customerName && b.client) {
+      const client = await Client.findById(b.client).select('name');
+      customerName = client?.name;
+    }
+    await InventoryHistory.findOneAndUpdate(
+      { site: site._id, bookingId: b.bookingId },
+      {
+        $set: {
+          site: site._id,
+          bookingId: b.bookingId,
+          mediaId: site.mediaId,
+          mediaType: site.mediaType,
+          state: site.state,
+          city: site.city,
+          mediaImage: site.mediaImage,
+          siteOwner: site.siteOwner,
+          status: 'booked',
+          isActive: site.isActive,
+          effectiveFrom: new Date(b.startDate),
+          effectiveTo: new Date(b.endDate),
+          changedAt: now,
+          changedBy: userId,
+          source,
+          bookingSnapshot: {
+            customerType: b.customerType,
+            client: b.client,
+            customerName,
+            startDate: b.startDate,
+            endDate: b.endDate,
+            durationDays: b.durationDays,
+            monthlyTotalCost: b.monthlyTotalCost,
+            amount: b.amount,
+          },
+        },
+      },
+      { upsert: true }
+    );
+  }
+}
+
+// Dynamic per-booking lifecycle for Timeline display — kept separate from the stored
+// 'booked' status so it always reflects today's date without needing a write. Non-booking
+// (available/blocked) rows have no lifecycle.
+function computeBookingLifecycle(item) {
+  if (item.status !== 'booked') return null;
+  const now = Date.now();
+  const start = item.effectiveFrom ? new Date(item.effectiveFrom).getTime() : null;
+  const end = item.effectiveTo ? new Date(item.effectiveTo).getTime() : null;
+  if (start != null && now < start) return 'upcoming';
+  if (end != null && now > end) return 'completed';
+  return 'active';
 }
 
 // Period-overlap filter: a history record is included if its period intersects [from, to].
@@ -86,4 +141,4 @@ function buildOverlapFilter(query) {
   return filter;
 }
 
-module.exports = { recordStatusPeriod, buildOverlapFilter, nowIST };
+module.exports = { recordStatusPeriod, buildOverlapFilter, nowIST, syncBookingTimelineRecords, computeBookingLifecycle };

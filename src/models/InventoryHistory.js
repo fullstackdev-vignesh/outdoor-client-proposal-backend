@@ -16,6 +16,11 @@ const inventoryHistorySchema = new mongoose.Schema({
   previousStatus: { type: String, enum: ['available', 'booked', 'blocked', null], default: null },
   isActive: { type: Boolean, default: true },
 
+  // Identifies which booking (Site.bookings[].bookingId) this row represents — lets a site
+  // with several bookings get one independent Timeline row per booking instead of only its
+  // current/active one. Unset for non-booking (available/blocked) rows.
+  bookingId: { type: String, default: null, index: true },
+
   // Period the status applies to. effectiveTo = null means the period is still open/ongoing.
   effectiveFrom: { type: Date, required: true, index: true },
   effectiveTo: { type: Date, default: null, index: true },
@@ -44,5 +49,8 @@ const inventoryHistorySchema = new mongoose.Schema({
 
 inventoryHistorySchema.index({ site: 1, effectiveTo: 1 });
 inventoryHistorySchema.index({ effectiveFrom: 1, effectiveTo: 1 });
+// One Timeline row per booking — the upsert in syncBookingTimelineRecords relies on this to
+// update in place instead of ever inserting a duplicate for the same bookingId.
+inventoryHistorySchema.index({ site: 1, bookingId: 1 }, { unique: true, partialFilterExpression: { bookingId: { $type: 'string' } } });
 
 module.exports = mongoose.model('InventoryHistory', inventoryHistorySchema);
