@@ -1,6 +1,7 @@
 const asyncHandler = require('express-async-handler');
 const Proposal = require('../models/Proposal');
 const Site = require('../models/Site');
+const Client = require('../models/Client');
 const { generateProposalPpt, generateProposalExcel } = require('../utils/proposalFileGenerator');
 
 const genProposalId = () => `PR-${Date.now().toString(36).toUpperCase()}`;
@@ -40,12 +41,25 @@ const getProposal = asyncHandler(async (req, res) => {
 
 const createProposal = asyncHandler(async (req, res) => {
   const { client, sites, pptTemplate, excelTemplate, variant, totalAmount, gstAmount, monthlyAmount } = req.body;
+  if (!client) {
+    res.status(400);
+    throw new Error('A client must be selected');
+  }
+  const clientDoc = await Client.findById(client);
+  if (!clientDoc) {
+    res.status(400);
+    throw new Error('Selected client could not be found');
+  }
   if (!Array.isArray(sites) || sites.length === 0) {
     res.status(400);
     throw new Error('At least one media/site must be selected');
   }
 
   const siteDocs = await Site.find({ _id: { $in: sites } });
+  if (siteDocs.length !== sites.length) {
+    res.status(400);
+    throw new Error('One or more selected sites could not be found');
+  }
   const unavailable = siteDocs.filter((s) => s.mediaStatus !== 'available');
   if (unavailable.length > 0) {
     res.status(400);

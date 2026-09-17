@@ -3,10 +3,19 @@ const path = require('path');
 const { PptxTemplate, extOf } = require('./pptxTemplateEngine');
 const { generateExcelFromTemplate } = require('./excelTemplateEngine');
 const { getRouteMapBuffer } = require('./mapService');
-const { uploadFile } = require('./storageService');
+const { uploadFile, uploadFileToCloud } = require('./storageService');
 const PPTTemplate = require('../models/PPTTemplate');
 
 const BACKEND_ROOT = path.join(__dirname, '..', '..');
+
+function sanitizePathSegment(value) {
+  return (
+    String(value || '')
+      .trim()
+      .replace(/[^a-zA-Z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'client'
+  );
+}
 
 async function getImageBuffer(image) {
   if (!image) return null;
@@ -41,13 +50,36 @@ function formatDisplayDate(date) {
 }
 
 async function generateProposalPpt(proposal) {
+  if (!proposal.client) {
+    throw new Error('Selected client could not be found for this proposal');
+  }
+  if (!Array.isArray(proposal.sites) || proposal.sites.length === 0) {
+    throw new Error('No site is selected for this proposal');
+  }
+  if (!proposal.pptTemplate) {
+    throw new Error('No PPT template is selected for this proposal');
+  }
+
   let templateFileUrl = null;
-  if (proposal.pptTemplate) {
-    if (typeof proposal.pptTemplate === 'object' && proposal.pptTemplate.fileUrl) {
-      templateFileUrl = proposal.pptTemplate.fileUrl;
-    } else if (typeof proposal.pptTemplate === 'string') {
-      const tplDoc = await PPTTemplate.findById(proposal.pptTemplate);
-      if (tplDoc) templateFileUrl = tplDoc.fileUrl;
+  if (typeof proposal.pptTemplate === 'object' && proposal.pptTemplate.fileUrl) {
+    templateFileUrl = proposal.pptTemplate.fileUrl;
+  } else if (typeof proposal.pptTemplate === 'object') {
+    templateFileUrl = null;
+  } else {
+    const tplDoc = await PPTTemplate.findById(proposal.pptTemplate);
+    if (!tplDoc) {
+      throw new Error('Selected PPT template no longer exists');
+    }
+    templateFileUrl = tplDoc.fileUrl;
+  }
+
+  if (!templateFileUrl) {
+    throw new Error('The selected PPT template has no uploaded PPTX file');
+  }
+  if (!/^https?:\/\//i.test(templateFileUrl)) {
+    const absTemplatePath = path.resolve(BACKEND_ROOT, templateFileUrl.replace(/^\//, ''));
+    if (!fs.existsSync(absTemplatePath)) {
+      throw new Error('The PPTX file for the selected template could not be found on the server');
     }
   }
 
@@ -163,21 +195,24 @@ async function generateProposalPpt(proposal) {
 
   const buffer = await tpl.save();
 
+  // Generated proposal PPTX always lives in the cloud bucket, never on local disk.
+  // The folder is keyed off the client name + the proposal's creation date (not "today"),
+  // and the file name reuses the existing proposalId convention, so a refresh/regenerate
+  // overwrites the same cloud object instead of piling up duplicates.
+  const clientNameSafe = sanitizePathSegment(client.name);
+  const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : new Date()).toISOString().slice(0, 10);
+  const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+
   let pptUrl;
   try {
-    pptUrl = await uploadFile(
+    pptUrl = await uploadFileToCloud(
       buffer,
       `${proposal.proposalId}.pptx`,
       'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-      'generated'
+      folder
     );
-  } catch (spaceErr) {
-    console.warn('Cloud storage upload failed for PPT, falling back to local storage:', spaceErr.message);
-    const localDir = path.join(BACKEND_ROOT, 'uploads', 'generated');
-    fs.mkdirSync(localDir, { recursive: true });
-    const localPath = path.join(localDir, `${proposal.proposalId}.pptx`);
-    fs.writeFileSync(localPath, buffer);
-    pptUrl = `/uploads/generated/${proposal.proposalId}.pptx`;
+  } catch (uploadErr) {
+    throw new Error(`Failed to upload generated PPT to cloud storage: ${uploadErr.message}`);
   }
 
   return pptUrl;
