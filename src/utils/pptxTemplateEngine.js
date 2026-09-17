@@ -196,6 +196,14 @@ class PptxTemplate {
     this.writeText('ppt/slides/slide1.xml', slideXml);
   }
 
+  // adinn-new-template's slide1 splits "Date: Aug 10, 2026" across two runs ("D" + "ate: Aug 10, 2026").
+  // Only the "ate: ..." run is touched so the "D" run/formatting is left completely intact.
+  async setCoverDateLabel(dateLabel) {
+    let slideXml = await this.readText('ppt/slides/slide1.xml');
+    slideXml = slideXml.replace(/<a:t>ate:\s*[^<]*<\/a:t>/, `<a:t>ate: ${xmlEscape(dateLabel)}</a:t>`);
+    this.writeText('ppt/slides/slide1.xml', slideXml);
+  }
+
   async setFinalSlideOrder(orderedBaseNames) {
     const presRelsXml = await this.readText('ppt/_rels/presentation.xml.rels');
     let presentationXml = await this.readText('ppt/presentation.xml');

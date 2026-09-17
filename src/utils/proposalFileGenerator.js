@@ -61,16 +61,20 @@ async function generateProposalPpt(proposal) {
   }
 
   let templateFileUrl = null;
+  let templateName = null;
   if (typeof proposal.pptTemplate === 'object' && proposal.pptTemplate.fileUrl) {
     templateFileUrl = proposal.pptTemplate.fileUrl;
+    templateName = proposal.pptTemplate.name;
   } else if (typeof proposal.pptTemplate === 'object') {
     templateFileUrl = null;
+    templateName = proposal.pptTemplate.name;
   } else {
     const tplDoc = await PPTTemplate.findById(proposal.pptTemplate);
     if (!tplDoc) {
       throw new Error('Selected PPT template no longer exists');
     }
     templateFileUrl = tplDoc.fileUrl;
+    templateName = tplDoc.name;
   }
 
   if (!templateFileUrl) {
@@ -86,11 +90,40 @@ async function generateProposalPpt(proposal) {
   const tpl = await PptxTemplate.load(templateFileUrl);
   const client = proposal.client || {};
   const sites = proposal.sites || [];
+  const now = new Date();
+  const isAdinnNewTemplate = templateName === 'adinn-new-template';
 
   await tpl.setCoverFields({
     customerLabel: customerLabel(proposal),
-    dateLabel: formatDisplayDate(new Date()),
+    dateLabel: formatDisplayDate(now),
   });
+
+  if (isAdinnNewTemplate) {
+    // adinn-new-template: only slide 1's date is patched for now. Slides 2, 3 and beyond
+    // are left exactly as in the reference file — no per-city/per-site cloning yet
+    // (rules for the remaining slides will be added in a later change).
+    await tpl.setCoverDateLabel(formatDisplayDate(now));
+
+    const buffer = await tpl.save();
+    const clientNameSafe = sanitizePathSegment(client.name);
+    const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
+    const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+    const dd = String(now.getDate()).padStart(2, '0');
+    const monthWords = now.toLocaleString('en-US', { month: 'long' });
+    const yyyy = now.getFullYear();
+    const fileName = `${clientNameSafe}-${dd}-${monthWords}-${yyyy}-${proposal.proposalId}.pptx`;
+
+    try {
+      return await uploadFileToCloud(
+        buffer,
+        fileName,
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        folder
+      );
+    } catch (uploadErr) {
+      throw new Error(`Failed to upload generated PPT to cloud storage: ${uploadErr.message}`);
+    }
+  }
 
   const slideFiles = await tpl.getSlideFiles();
   const coverTpl = 'slide1';
