@@ -8,6 +8,23 @@ const PPTTemplate = require('../models/PPTTemplate');
 
 const BACKEND_ROOT = path.join(__dirname, '..', '..');
 
+// adinn-new-template slide 4's Media Specifications label/value textboxes are narrower than
+// their text at 25pt, causing PowerPoint to wrap single words character-by-character. Widening
+// them (position/height/style untouched) keeps each field on one line; the gap to the next
+// column (or the slide edge) leaves enough margin that this can never overlap anything.
+const ADINN_MEDIA_SPEC_BOX_WIDTHS = [
+  { offX: 12630560, offY: 2842286, widthEMU: 2500000 }, // City: (label)
+  { offX: 12639846, offY: 4233166, widthEMU: 2500000 }, // Size: (label)
+  { offX: 12639846, offY: 5626991, widthEMU: 2500000 }, // Media type: (label)
+  { offX: 12635198, offY: 7020816, widthEMU: 2500000 }, // Illumination: (label)
+  { offX: 12635198, offY: 8414641, widthEMU: 2500000 }, // Unit: (label)
+  { offX: 15377227, offY: 2842286, widthEMU: 2700000 }, // City value
+  { offX: 15377227, offY: 4233166, widthEMU: 2700000 }, // Size value
+  { offX: 15377227, offY: 5626991, widthEMU: 2700000 }, // Media type value
+  { offX: 15377227, offY: 7020816, widthEMU: 2700000 }, // Illumination value
+  { offX: 15377227, offY: 8408521, widthEMU: 2700000 }, // Unit value
+];
+
 function sanitizePathSegment(value) {
   return (
     String(value || '')
@@ -129,6 +146,7 @@ async function generateProposalPpt(proposal) {
           ['1', site.sizeUnit || '-'],
         ],
         images: siteImage ? [{ relId: 'rId6', ...siteImage, boxWidthEMU: 11366193, boxHeightEMU: 7736815 }] : [],
+        boxWidths: ADINN_MEDIA_SPEC_BOX_WIDTHS,
       });
       siteSlideBaseNames.push(slide4Base);
 

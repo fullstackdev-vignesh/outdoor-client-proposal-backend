@@ -238,7 +238,7 @@ class PptxTemplate {
   // images: [{ relId, buffer, ext, boxWidthEMU, boxHeightEMU }]
   // clearImageRelId: relationship id whose blipFill should become empty (map placeholder)
   // placeholderText: { offX, offY, extCx, extCy, text } — new centered textbox for that empty area
-  async cloneAdinnSiteSlide(templateBaseName, { textReplacements = [], images = [], clearImageRelId, placeholderText } = {}) {
+  async cloneAdinnSiteSlide(templateBaseName, { textReplacements = [], images = [], clearImageRelId, placeholderText, boxWidths = [] } = {}) {
     const slidePath = `ppt/slides/${templateBaseName}.xml`;
     const relsPath = `ppt/slides/_rels/${templateBaseName}.xml.rels`;
 
@@ -250,6 +250,13 @@ class PptxTemplate {
       if (slideXml.includes(target)) {
         slideXml = slideXml.replace(target, `<a:t>${xmlEscape(newText)}</a:t>`);
       }
+    }
+
+    // Widen a specific textbox (matched by its exact <a:off>) so its text fits on one line
+    // instead of wrapping character-by-character. Only cx changes — position/height/style stay.
+    for (const { offX, offY, widthEMU } of boxWidths) {
+      const re = new RegExp(`(<a:off x="${offX}" y="${offY}"\\/><a:ext cx=")\\d+("\\s*cy="\\d+"\\/>)`);
+      slideXml = slideXml.replace(re, `$1${widthEMU}$2`);
     }
 
     for (const { relId, buffer, ext, boxWidthEMU, boxHeightEMU } of images) {
