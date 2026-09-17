@@ -31,11 +31,17 @@ const SPEC_MEDIA_TYPE_RUN = 'Hoarding';
 const SPEC_ILLUMINATION_RUN = 'Frontlit';
 const SPEC_UNIT_RUN = '1';
 
-// Bounding box (EMU) for the site photo inserted on the spec slide — the source
-// template has no existing photo placeholder there, so we add a new bordered
-// picture in the open area left of the "Media Specifications" column (which
-// starts at x=12630560 EMU in the template).
-const SPEC_PHOTO_BOX = { x: 800000, y: 1550000, w: 10500000, h: 7900000 };
+// Slide 4 (spec): the source template's OWN existing site-photo shape — a
+// grouped Freeform with its own black border ("Group 20" > "Freeform 21" in
+// the shipped assets/proposal-templates/adinn-new-template.pptx's slide4 XML),
+// embedded via relationship rId6. We replace this shape's image/crop in place
+// (like the map slide already does for its own photo slot) instead of adding a
+// second picture on top of it — that second-picture approach left the
+// original sample image's corner peeking out on the right and overlapping the
+// bottom location-pin shape. Box below is that shape's own absolute position
+// (off) and size (ext), read from its group transform — never computed/guessed.
+const SPEC_PHOTO_BOX = { x: 754865, y: 1469733, w: 11366193, h: 7736815 };
+const SPEC_PHOTO_REL_ID = 'rId6';
 // Bounding box (EMU) of the two existing image shapes on the map slide
 // ("Freeform 9" = rId6 = site-photo slot, "Freeform 12" = rId7 = map slot).
 const MAP_SHAPE_BOX = { w: 5643663, h: 5618536 };
@@ -79,19 +85,6 @@ function computeCoverSrcRect(imgW, imgH, boxW, boxH) {
 
 function srcRectXml(srcRect) {
   return srcRect ? `<a:srcRect l="${srcRect.l}" t="${srcRect.t}" r="${srcRect.r}" b="${srcRect.b}"/>` : '';
-}
-
-/** Builds a new, editable <p:pic> element (native PPT picture, not a raster
- * slide) for insertion into a slide's <p:spTree>. */
-function buildPicXml({ id, name, relId, box, srcRect }) {
-  return (
-    `<p:pic><p:nvPicPr><p:cNvPr id="${id}" name="${xmlEscape(name)}"/>` +
-    `<p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>` +
-    `<p:blipFill><a:blip r:embed="${relId}"/>${srcRectXml(srcRect)}<a:stretch><a:fillRect/></a:stretch></p:blipFill>` +
-    `<p:spPr><a:xfrm><a:off x="${box.x}" y="${box.y}"/><a:ext cx="${box.w}" cy="${box.h}"/></a:xfrm>` +
-    `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
-    `<a:ln w="28575"><a:solidFill><a:srgbClr val="1A1A1A"/></a:solidFill></a:ln></p:spPr></p:pic>`
-  );
 }
 
 function buildPlaceholderXml({ id, box, label }) {
@@ -156,16 +149,13 @@ async function buildSpecSlide(tpl, site, siteImage) {
 
   if (siteImage) {
     const target = await tpl.addMediaFile(siteImage.buffer, siteImage.ext);
-    const relId = 'rIdSitePhotoGen';
-    relsXml = relsXml.replace(
-      '</Relationships>',
-      `<Relationship Id="${relId}" Target="${target}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"/></Relationships>`
-    );
+    relsXml = tpl.replaceRelTarget(relsXml, SPEC_PHOTO_REL_ID, target);
     const dims = getImageDimensions(siteImage.buffer, siteImage.ext);
     const srcRect = dims ? computeCoverSrcRect(dims.width, dims.height, SPEC_PHOTO_BOX.w, SPEC_PHOTO_BOX.h) : null;
-    const picXml = buildPicXml({ id: 9500, name: 'Site Photo', relId, box: SPEC_PHOTO_BOX, srcRect });
-    slideXml = insertIntoSpTree(slideXml, picXml);
+    slideXml = replaceBlipFillSrcRect(slideXml, SPEC_PHOTO_REL_ID, srcRect);
   } else {
+    // No dynamic photo available: overlay a placeholder directly on top of the
+    // template's own existing photo shape, at that same shape's exact bounds.
     slideXml = insertIntoSpTree(slideXml, buildPlaceholderXml({ id: 9500, box: SPEC_PHOTO_BOX, label: 'Site image not available' }));
   }
 

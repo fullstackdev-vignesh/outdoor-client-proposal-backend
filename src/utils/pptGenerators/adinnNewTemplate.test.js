@@ -47,6 +47,36 @@ async function getMediaFileNames(buffer) {
   return Object.keys(zip.files).filter((f) => /^ppt\/media\/.+\.(png|jpe?g|gif|webp|svg)$/i.test(f));
 }
 
+/** Same ordering as getOrderedSlideXmls, but returns each slide's own _rels XML
+ * — used to verify which media file a relationship (e.g. rId6) actually points
+ * to, rather than just what's inline in the slide's shape XML. */
+async function getOrderedSlideRels(buffer) {
+  const zip = await loadZip(buffer);
+  const pres = await zip.file('ppt/presentation.xml').async('string');
+  const presRels = await zip.file('ppt/_rels/presentation.xml.rels').async('string');
+  const relIdToTarget = {};
+  for (const m of presRels.matchAll(/<Relationship Id="([^"]+)"[^>]*Target="([^"]+)"/g)) {
+    relIdToTarget[m[1]] = m[2];
+  }
+  const sldIdLst = pres.match(/<p:sldIdLst>[\s\S]*?<\/p:sldIdLst>/)[0];
+  const relIds = [...sldIdLst.matchAll(/r:id="([^"]+)"/g)].map((m) => m[1]);
+  return Promise.all(relIds.map((relId) => {
+    const baseName = relIdToTarget[relId].split('/').pop();
+    return zip.file(`ppt/slides/_rels/${baseName}.rels`).async('string');
+  }));
+}
+
+function relTarget(relsXml, relId) {
+  const m = relsXml.match(new RegExp(`<Relationship Id="${relId}"[^>]*Target="([^"]+)"`));
+  return m ? m[1] : null;
+}
+
+async function mediaBytesAt(buffer, relativeTarget) {
+  const zip = await loadZip(buffer);
+  const file = zip.file(`ppt/media/${relativeTarget.split('/').pop()}`);
+  return file ? file.async('nodebuffer') : null;
+}
+
 function textsOf(xml) {
   return [...xml.matchAll(/<a:t>([^<]*)<\/a:t>/g)].map((m) => m[1]);
 }
@@ -173,33 +203,75 @@ describe('Adinn New Template PPT generator - dynamic content', () => {
   });
 });
 
-describe('Adinn New Template PPT generator - site photo replacement', () => {
-  it('inserts the site photo as an editable native picture on the spec slide, sized to the existing photo area', async () => {
+describe('Adinn New Template PPT generator - Slide 4 site photo replacement', () => {
+  // The source template's own existing photo shape's absolute position/size
+  // (Group 20 > Freeform 21, rId6) — must stay byte-identical since we now
+  // repoint that shape's image instead of computing/guessing new coordinates.
+  const ORIGINAL_BOUNDS = '<a:off x="754865" y="1469733"/><a:ext cx="11366193" cy="7736815"/>';
+
+  it('replaces the existing template photo shape in place — exactly one site photo, no second picture layered on top', async () => {
     const getImageBuffer = vi.fn(async () => ({ buffer: TINY_PNG_BUFFER, ext: 'png' }));
     const buf = await gen({ proposal: { client }, client, sites: [site({ mediaImage: '/uploads/site1.png' })], deps: { getImageBuffer } });
     const texts = await getOrderedSlideXmls(buf);
     const specXml = texts[3];
-    expect(specXml).toMatch(/<p:pic>/);
+    expect(specXml).not.toMatch(/<p:pic>/); // no new picture added on top
+    expect((specXml.match(/r:embed="rId6"/g) || []).length).toBe(1); // exactly one photo reference
     expect(getImageBuffer).toHaveBeenCalledWith('/uploads/site1.png');
-    const media = await getMediaFileNames(buf);
-    expect(media.length).toBeGreaterThan(0);
   });
 
-  it('reuses the same site photo on the map slide photo slot (existing shape, not a raster full-slide swap)', async () => {
+  it("preserves the original shape's exact position and size (no manual/guessed coordinates)", async () => {
     const getImageBuffer = vi.fn(async () => ({ buffer: TINY_PNG_BUFFER, ext: 'png' }));
     const buf = await gen({ proposal: { client }, client, sites: [site({ mediaImage: '/uploads/site1.png' })], deps: { getImageBuffer } });
     const texts = await getOrderedSlideXmls(buf);
-    const mapXml = texts[4];
-    // the map slide's photo slot is an existing template shape (blipFill), not a new <p:pic>
-    expect(mapXml).toContain('r:embed="rId6"');
-    expect(mapXml).not.toMatch(/<p:pic>/);
+    expect(texts[3]).toContain(ORIGINAL_BOUNDS);
   });
 
-  it('falls back to a placeholder (no crash) when no site photo is available', async () => {
+  it('actually swaps the old template sample image out for the new site photo (not just layered over it)', async () => {
+    const getImageBuffer = vi.fn(async () => ({ buffer: TINY_PNG_BUFFER, ext: 'png' }));
+    const buf = await gen({ proposal: { client }, client, sites: [site({ mediaImage: '/uploads/site1.png' })], deps: { getImageBuffer } });
+    const rels = await getOrderedSlideRels(buf);
+    const target = relTarget(rels[3], 'rId6');
+    expect(target).toMatch(/^\.\.\/media\/image_gen_\d+\.png$/); // repointed to a freshly-added file, not the template's original sample image
+    const bytes = await mediaBytesAt(buf, target);
+    expect(bytes.equals(TINY_PNG_BUFFER)).toBe(true);
+  });
+
+  it('does not cover or alter the location-pin shape', async () => {
+    const getImageBuffer = vi.fn(async () => ({ buffer: TINY_PNG_BUFFER, ext: 'png' }));
+    const buf = await gen({ proposal: { client }, client, sites: [site({ mediaImage: '/uploads/site1.png' })], deps: { getImageBuffer } });
+    const texts = await getOrderedSlideXmls(buf);
+    expect(texts[3]).toContain('maps.app.goo.gl/uZ459Wa5fqahfEF96'); // pin's own shape still present, untouched
+  });
+
+  it('uses the correct photo for each site across a multi-site proposal', async () => {
+    const imagesByPath = { '/uploads/site1.png': Buffer.from([1, 1, 1]), '/uploads/site2.png': Buffer.from([2, 2, 2]) };
+    const getImageBuffer = vi.fn(async (imagePath) => ({ buffer: imagesByPath[imagePath], ext: 'png' }));
+    const siteA = site({ mediaId: 'A', mediaImage: '/uploads/site1.png' });
+    const siteB = site({ mediaId: 'B', mediaImage: '/uploads/site2.png' });
+    const buf = await gen({ proposal: { client }, client, sites: [siteA, siteB], deps: { getImageBuffer } });
+    const rels = await getOrderedSlideRels(buf);
+    // 0 cover, 1 about, 2 why, 3 A-spec, 4 A-map, 5 B-spec, 6 B-map, 7 thankyou
+    const aBytes = await mediaBytesAt(buf, relTarget(rels[3], 'rId6'));
+    const bBytes = await mediaBytesAt(buf, relTarget(rels[5], 'rId6'));
+    expect(aBytes.equals(imagesByPath['/uploads/site1.png'])).toBe(true);
+    expect(bBytes.equals(imagesByPath['/uploads/site2.png'])).toBe(true);
+  });
+
+  it('falls back to a placeholder overlay (no crash) when no site photo is available, without adding a second picture', async () => {
     const buf = await gen({ proposal: { client }, client, sites: [site({ mediaImage: null })] });
     const texts = await getOrderedSlideXmls(buf);
     expect(textsOf(texts[3])).toContain('Site image not available');
     expect(texts[3]).not.toMatch(/<p:pic>/);
+    expect(texts[3]).toContain(ORIGINAL_BOUNDS); // placeholder overlays the same original shape's bounds
+  });
+
+  it('leaves the map slide (Slide 5) photo/map slots exactly as before', async () => {
+    const getImageBuffer = vi.fn(async () => ({ buffer: TINY_PNG_BUFFER, ext: 'png' }));
+    const buf = await gen({ proposal: { client }, client, sites: [site({ mediaImage: '/uploads/site1.png' })], deps: { getImageBuffer } });
+    const texts = await getOrderedSlideXmls(buf);
+    const mapXml = texts[4];
+    expect(mapXml).toContain('r:embed="rId6"');
+    expect(mapXml).not.toMatch(/<p:pic>/);
   });
 });
 
