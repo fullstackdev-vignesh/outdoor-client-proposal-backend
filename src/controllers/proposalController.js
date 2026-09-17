@@ -120,7 +120,9 @@ const generatePpt = asyncHandler(async (req, res) => {
     throw new Error('Proposal not found');
   }
   try {
-    proposal.generatedPptUrl = await generateProposalPpt(proposal);
+    const { url, filename } = await generateProposalPpt(proposal);
+    proposal.generatedPptUrl = url;
+    proposal.generatedPptFileName = filename;
     proposal.status = proposal.generatedExcelUrl ? 'completed' : 'generated';
     await proposal.save();
     res.json(proposal);
@@ -141,7 +143,9 @@ const generateExcel = asyncHandler(async (req, res) => {
     throw new Error('Proposal not found');
   }
   try {
-    proposal.generatedExcelUrl = await generateProposalExcel(proposal);
+    const { url, filename } = await generateProposalExcel(proposal);
+    proposal.generatedExcelUrl = url;
+    proposal.generatedExcelFileName = filename;
     proposal.status = proposal.generatedPptUrl ? 'completed' : 'generated';
     await proposal.save();
     res.json(proposal);

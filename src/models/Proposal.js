@@ -21,6 +21,11 @@ const proposalSchema = new mongoose.Schema(
     },
     generatedPptUrl: String,
     generatedExcelUrl: String,
+    // Human-readable download names (e.g. "Shiva-17-September-2026.xlsx") — kept separate
+    // from generatedPptUrl/generatedExcelUrl since the storage layer randomizes the physical
+    // filename for collision-safety across concurrent generations.
+    generatedPptFileName: String,
+    generatedExcelFileName: String,
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdAt: { type: Date, default: nowIST },
     updatedAt: { type: Date, default: nowIST },

@@ -42,6 +42,41 @@ function formatDisplayDate(date) {
   return new Intl.DateTimeFormat('en-US', { day: '2-digit', month: 'short', year: 'numeric' }).format(date);
 }
 
+const FULL_MONTHS = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+function safeFileNamePart(str) {
+  return String(str || 'Customer').replace(/[^a-zA-Z0-9]+/g, '') || 'Customer';
+}
+
+// Human-readable download filename base, e.g. "Shiva-17-September-2026" — kept separate from
+// the storage layer's own randomized physical filename (see saveGeneratedFile) since
+// uploadFile always randomizes for collision-safety across concurrent generations.
+function outputBaseName(proposal) {
+  const d = new Date();
+  const client = proposal.client || {};
+  return `${safeFileNamePart(client.name)}-${d.getDate()}-${FULL_MONTHS[d.getMonth()]}-${d.getFullYear()}`;
+}
+
+async function saveGeneratedFile(buffer, filename, mimeType) {
+  let url;
+  try {
+    url = await uploadFile(buffer, filename, mimeType, 'generated');
+  } catch (spaceErr) {
+    console.warn(`Cloud storage upload failed for ${filename}, falling back to local storage:`, spaceErr.message);
+    const localDir = path.join(BACKEND_ROOT, 'uploads', 'generated');
+    fs.mkdirSync(localDir, { recursive: true });
+    const crypto = require('crypto');
+    const ext = path.extname(filename);
+    const storedName = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${ext}`;
+    fs.writeFileSync(path.join(localDir, storedName), buffer);
+    url = `/uploads/generated/${storedName}`;
+  }
+  return { url, filename };
+}
+
 async function generateProposalPpt(proposal) {
   let templateFileUrl = null;
   if (proposal.pptTemplate) {
@@ -165,27 +200,10 @@ async function generateProposalPpt(proposal) {
 
   const buffer = await tpl.save();
 
-  let pptUrl;
-  try {
-    pptUrl = await uploadFile(
-      buffer,
-      `${proposal.proposalId}.pptx`,
-      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-      'generated'
-    );
-  } catch (spaceErr) {
-    console.warn('Cloud storage upload failed for PPT, falling back to local storage:', spaceErr.message);
-    const localDir = path.join(BACKEND_ROOT, 'uploads', 'generated');
-    fs.mkdirSync(localDir, { recursive: true });
-    const localPath = path.join(localDir, `${proposal.proposalId}.pptx`);
-    fs.writeFileSync(localPath, buffer);
-    pptUrl = `/uploads/generated/${proposal.proposalId}.pptx`;
-  }
-
-  return pptUrl;
+  return saveGeneratedFile(buffer, `${outputBaseName(proposal)}.pptx`, 'application/vnd.openxmlformats-officedocument.presentationml.presentation');
 }
 
-function buildExcelRow(site, index, client) {
+function buildExcelRow(site, index) {
   return {
     siNo: index + 1,
     state: site.state || '',
@@ -201,8 +219,6 @@ function buildExcelRow(site, index, client) {
     printingCost: site.printingCost || 0,
     mountingCost: site.mountingCost || 0,
     siteStatus: site.mediaStatus ? site.mediaStatus.charAt(0).toUpperCase() + site.mediaStatus.slice(1) : '',
-    vendorName: client.vendorName || '',
-    vendorCost: client.vendorCost || 0,
   };
 }
 
@@ -231,30 +247,14 @@ async function loadTemplateBuffer(fileUrl) {
 
 async function generateProposalExcel(proposal) {
   const client = proposal.client || {};
-  const rows = (proposal.sites || []).map((s, i) => buildExcelRow(s, i, client));
+  const rows = (proposal.sites || []).map((s, i) => buildExcelRow(s, i));
 
   const { fileUrl, config } = await resolveExcelTemplate(proposal);
   const buffer = await loadTemplateBuffer(fileUrl);
 
-  const outBuffer = await generateExcelFromTemplate(rows, { buffer: buffer || undefined, config });
+  const outBuffer = await generateExcelFromTemplate(rows, { buffer: buffer || undefined, config, client });
 
-  let excelUrl;
-  try {
-    excelUrl = await uploadFile(
-      outBuffer,
-      `${proposal.proposalId}.xlsx`,
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'generated'
-    );
-  } catch (spaceErr) {
-    console.warn('Cloud storage upload failed for Excel, falling back to local storage:', spaceErr.message);
-    const localDir = path.join(BACKEND_ROOT, 'uploads', 'generated');
-    fs.mkdirSync(localDir, { recursive: true });
-    const localPath = path.join(localDir, `${proposal.proposalId}.xlsx`);
-    fs.writeFileSync(localPath, outBuffer);
-    excelUrl = `/uploads/generated/${proposal.proposalId}.xlsx`;
-  }
-  return excelUrl;
+  return saveGeneratedFile(outBuffer, `${outputBaseName(proposal)}.xlsx`, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
 }
 
 module.exports = { generateProposalPpt, generateProposalExcel };

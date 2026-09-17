@@ -55,11 +55,11 @@ function validateClientPayload(body, { requireGeo = false } = {}) {
   if (body.longitude !== undefined && body.longitude !== '' && (isNaN(num(body.longitude)) || num(body.longitude) < -180 || num(body.longitude) > 180)) {
     errors.push('Longitude must be between -180 and 180');
   }
-  if (body.agencyComm !== undefined && body.agencyComm !== '' && (isNaN(num(body.agencyComm)) || num(body.agencyComm) < 0)) {
-    errors.push('Agency Comm must be a number greater than or equal to 0');
+  if (body.agencyComm !== undefined && body.agencyComm !== '' && (isNaN(num(body.agencyComm)) || num(body.agencyComm) < 0 || num(body.agencyComm) > 100)) {
+    errors.push('Agency Comm must be a percentage between 0 and 100');
   }
-  if (body.vendorCost !== undefined && body.vendorCost !== '' && (isNaN(num(body.vendorCost)) || num(body.vendorCost) < 0)) {
-    errors.push('Vendor Cost must be a number greater than or equal to 0');
+  if (body.gst !== undefined && body.gst !== '' && (isNaN(num(body.gst)) || num(body.gst) < 0 || num(body.gst) > 100)) {
+    errors.push('GST must be a percentage between 0 and 100');
   }
   return errors;
 }

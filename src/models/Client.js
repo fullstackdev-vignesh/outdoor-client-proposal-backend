@@ -12,10 +12,10 @@ const clientSchema = new mongoose.Schema(
     location: { type: String, trim: true },
     latitude: { type: Number, min: -90, max: 90 },
     longitude: { type: Number, min: -180, max: 180 },
-    agencyComm: { type: Number, min: 0 },
-    gst: { type: String, trim: true },
-    vendorName: { type: String, trim: true },
-    vendorCost: { type: Number, min: 0 },
+    agencyComm: { type: Number, min: 0, max: 100 },
+    // Percentage (e.g. 18 => 18%), not a GST registration number — drives the optional GST
+    // column in generated proposal Excel exports (see excelTemplateConfigs.js).
+    gst: { type: Number, min: 0, max: 100 },
     notes: String,
     isActive: { type: Boolean, default: true },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

@@ -22,10 +22,14 @@ const ADINN_EXCEL_1 = {
   hasTermsAfterTotal: true,
   columns: {
     siNo: 'A', city: 'B', media: 'C', location: 'D', qty: 'E', width: 'F', height: 'G',
-    type: 'H', displayCostPerMonth: 'J', printingCost: 'K', mountingCost: 'L',
-    siteStatus: 'N', vendorName: 'O', vendorCost: 'P',
+    type: 'H', displayCostPerMonth: 'J', printingCost: 'K', mountingCost: 'L', siteStatus: 'N',
   },
-  totalColumns: ['E', 'I', 'J', 'K', 'L', 'M', 'P'],
+  totalColumns: ['E', 'I', 'J', 'K', 'L', 'M'],
+  // Vendor Name/Vendor Cost are unused — dropped from the sheet entirely (not just left
+  // blank). Agency Comm / GST are inserted right before Total Cost, in that order, ONLY when
+  // the client has that percentage set — see applyAdinnDynamicColumns in excelTemplateEngine.js.
+  removeColumns: ['O', 'P'],
+  feeColumnsBeforeAnchor: 'M',
 };
 
 // ROTN — real uploaded proposal file used as master. Header row1, one blank spacer row2,
@@ -48,9 +52,19 @@ const ROTN_EXCEL_1 = {
     siNo: 'A', state: 'B', city: 'C', media: 'D', location: 'E', type: 'F', width: 'G', height: 'H',
     qty: 'J', durationDays: 'L', displayCostPerMonth: 'M', printingCost: 'O', mountingCost: 'P',
   },
-  // Left blank (zeroed) on every block's 2nd row — no corresponding Site field for the
-  // secondary W/H pair this template's Area formula (K) also references.
+  // No Site field maps to the block's 2nd row (a secondary W/H pair) — rather than leave it
+  // visible with a meaningless "0  0", it's deleted outright (collapseSecondaryRows in
+  // excelTemplateEngine.js). Both of these per-row formulas self-reference their own row and
+  // must be rewritten once collapsing settles each site onto its final row number — Area (K)
+  // originally folds in the deleted row's W/H too; Display Duration Cost (N) is an Excel
+  // "shared formula" whose literal host text would otherwise keep pointing at its pre-collapse
+  // row.
   secondaryRowColumns: ['G', 'H'],
+  collapseSecondaryRow: true,
+  selfReferencingFormulas: [
+    { column: 'K', build: (r, cols) => `${cols.width}${r}*${cols.height}${r}` },
+    { column: 'N', build: (r, cols) => `${cols.displayCostPerMonth}${r}/30*${cols.durationDays}${r}` },
+  ],
   totalColumns: ['J', 'K', 'M', 'N', 'O', 'P', 'Q'],
 };
 
