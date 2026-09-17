@@ -39,7 +39,7 @@ function getImageDimensions(buffer, ext) {
   return null;
 }
 
-// "object-fit: cover" style crop, expressed as OOXML <a:fillRect> insets (thousandths of a percent).
+// "object-fit: cover" style crop, expressed as OOXML <a:srcRect> insets (thousandths of a percent).
 function computeCoverFillRect(srcW, srcH, boxW, boxH) {
   if (!srcW || !srcH || !boxW || !boxH) return { l: 0, t: 0, r: 0, b: 0 };
   const srcAR = srcW / srcH;
@@ -257,10 +257,16 @@ class PptxTemplate {
       const newTarget = await this.addMediaFile(buffer, ext);
       relsXml = this.replaceRelTarget(relsXml, relId, newTarget);
 
+      // <a:fillRect> insets shrink the visible image *within* the shape (leaving gaps) — the
+      // correct "cover crop" element is <a:srcRect>, which crops the source image itself before
+      // the (gap-free) stretch-to-fill-shape happens.
       const dims = getImageDimensions(buffer, ext);
       const rect = dims ? computeCoverFillRect(dims.width, dims.height, boxWidthEMU, boxHeightEMU) : { l: 0, t: 0, r: 0, b: 0 };
-      const fillRectRe = new RegExp(`(<a:blip r:embed="${relId}"\\/><a:stretch><a:fillRect) l="-?\\d+" t="-?\\d+" r="-?\\d+" b="-?\\d+"(\\/>)`);
-      slideXml = slideXml.replace(fillRectRe, `$1 l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"$2`);
+      const blipStretchRe = new RegExp(`<a:blip r:embed="${relId}"\\/><a:stretch><a:fillRect[^/]*\\/><\\/a:stretch>`);
+      slideXml = slideXml.replace(
+        blipStretchRe,
+        `<a:blip r:embed="${relId}"/><a:srcRect l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"/><a:stretch><a:fillRect/></a:stretch>`
+      );
     }
 
     if (clearImageRelId) {
