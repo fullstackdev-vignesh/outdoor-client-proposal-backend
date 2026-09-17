@@ -1,7 +1,8 @@
 const asyncHandler = require('express-async-handler');
 const { saveTemplateFile } = require('../utils/templateStorage');
 
-function makeTemplateController(Model) {
+function makeTemplateController(Model, options = {}) {
+  const fileHandler = options.fileHandler || saveTemplateFile;
   const getAll = asyncHandler(async (req, res) => {
     const filter = {};
     if (req.query.status) filter.status = req.query.status;
@@ -22,7 +23,12 @@ function makeTemplateController(Model) {
   const create = asyncHandler(async (req, res) => {
     const payload = { ...req.body, createdBy: req.user._id };
     if (req.file) {
-      payload.fileUrl = await saveTemplateFile(req.file);
+      try {
+        payload.fileUrl = await fileHandler(req.file, payload);
+      } catch (err) {
+        res.status(400);
+        throw err;
+      }
     }
     const item = await Model.create(payload);
     res.status(201).json(item);
@@ -35,7 +41,12 @@ function makeTemplateController(Model) {
       throw new Error('Template not found');
     }
     if (req.file) {
-      req.body.fileUrl = await saveTemplateFile(req.file);
+      try {
+        req.body.fileUrl = await fileHandler(req.file, { ...item.toObject(), ...req.body });
+      } catch (err) {
+        res.status(400);
+        throw err;
+      }
     }
     Object.assign(item, req.body);
     await item.save();
