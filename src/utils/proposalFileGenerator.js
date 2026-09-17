@@ -122,6 +122,16 @@ async function generateProposalPpt(proposal) {
     // file and appended after all the per-site pairs (their own rules come in a later change).
     await tpl.setCoverDateLabel(formatDisplayDate(now));
 
+    // Slide 2's "Who we are" heading wraps to 2 lines at its original width; widen it using the
+    // small gaps already free on either side (a decorative shape sits just left of it, and the
+    // "ABOUT US" card sits just right of it), without moving/resizing anything else on the slide.
+    await tpl.resizeTextBox('ppt/slides/slide2.xml', {
+      offX: 7609014,
+      offY: 2436416,
+      newOffX: 7500000,
+      newWidthEMU: 3150000,
+    });
+
     const slideFiles = await tpl.getSlideFiles();
     const remainingSlides = slideFiles.filter((f) => !['slide1', 'slide2', 'slide3', 'slide4', 'slide5'].includes(f));
 

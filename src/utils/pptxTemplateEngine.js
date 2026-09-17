@@ -315,6 +315,16 @@ class PptxTemplate {
     this.writeText('ppt/slides/slide1.xml', slideXml);
   }
 
+  // Widens (and optionally re-centers) a single textbox on a given slide part, matched by its
+  // exact original <a:off>. Only x/width change — y, height, font, color and every other
+  // element on the slide are left untouched.
+  async resizeTextBox(slidePath, { offX, offY, newOffX = offX, newWidthEMU }) {
+    let slideXml = await this.readText(slidePath);
+    const re = new RegExp(`<a:off x="${offX}" y="${offY}"\\/><a:ext cx="\\d+"( cy="\\d+"\\/>)`);
+    slideXml = slideXml.replace(re, `<a:off x="${newOffX}" y="${offY}"/><a:ext cx="${newWidthEMU}"$1`);
+    this.writeText(slidePath, slideXml);
+  }
+
   async setFinalSlideOrder(orderedBaseNames) {
     const presRelsXml = await this.readText('ppt/_rels/presentation.xml.rels');
     let presentationXml = await this.readText('ppt/presentation.xml');
