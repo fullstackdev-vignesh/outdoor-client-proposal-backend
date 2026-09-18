@@ -110,6 +110,9 @@ async function generateProposalPpt(proposal) {
   const now = new Date();
   const isAdinnNewTemplate = templateName === 'adinn-new-template';
   const isAdinnPhotosOnly = templateName === 'adinn-photos-only';
+  const isJagranTemplateTwo = templateName === 'Jagran-template-two';
+  const isJagranTemplateOne = templateName === 'Jagran-template-one';
+  const isPublicisOohTemplate = templateName === 'publicis-ooh-template';
 
   await tpl.setCoverFields({
     customerLabel: customerLabel(proposal),
@@ -238,6 +241,225 @@ async function generateProposalPpt(proposal) {
     }
 
     await tpl.setFinalSlideOrder(insertedBaseNames);
+
+    const buffer = await tpl.save();
+    const clientNameSafe = sanitizePathSegment(client.name);
+    const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
+    const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+
+    try {
+      return await uploadFileToCloud(
+        buffer,
+        `${proposal.proposalId}.pptx`,
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        folder
+      );
+    } catch (uploadErr) {
+      throw new Error(`Failed to upload generated PPT to cloud storage: ${uploadErr.message}`);
+    }
+  }
+
+  if (isPublicisOohTemplate) {
+    // publicis-ooh-template: reference slide1 (static "New Client Plan – PPT" cover) is kept
+    // verbatim. slide2 ("State – Tamil Nadu") is the state-title template, slide3 ("Coimbatore")
+    // is the city-title template, and slide4 (photo + multi-run title caption "Trichy Road –
+    // Radha Rani Theatre Bus Stop", no size) is the site-image template — cloned once per
+    // state/city/site, in selection order. Sites are grouped by state first, then by city within
+    // that state (both in first-seen order), mirroring the same city-grouping pattern used by
+    // adinn-photos-only/Jagran-template-one/-two, just with an extra state level on top. slide4's
+    // caption is a plain textbox (not a placeholder like Jagran-template-one's), so
+    // cloneCaptionPhotoSlide is told to anchor on that structural marker instead.
+    const slideFiles = await tpl.getSlideFiles();
+    const staticFirstSlide = slideFiles[0];
+    const staticLastSlide = slideFiles[slideFiles.length - 1];
+    const stateTitleTpl = 'slide2';
+    const cityTitleTpl = 'slide3';
+    const siteDetailTpl = 'slide4';
+
+    const sitesByState = {};
+    const stateOrder = [];
+    for (const site of sites) {
+      const state = site.state || 'Other';
+      if (!sitesByState[state]) {
+        sitesByState[state] = { cities: {}, cityOrder: [] };
+        stateOrder.push(state);
+      }
+      const city = site.city || 'Other';
+      if (!sitesByState[state].cities[city]) {
+        sitesByState[state].cities[city] = [];
+        sitesByState[state].cityOrder.push(city);
+      }
+      sitesByState[state].cities[city].push(site);
+    }
+
+    const insertedBaseNames = [];
+    for (const state of stateOrder) {
+      const stateTitleBase = await tpl.cloneSlide(stateTitleTpl, {
+        textReplacements: [['State – Tamil Nadu', `State – ${state}`]],
+      });
+      insertedBaseNames.push(stateTitleBase);
+
+      const { cities, cityOrder } = sitesByState[state];
+      for (const city of cityOrder) {
+        const cityTitleBase = await tpl.cloneSlide(cityTitleTpl, { textReplacements: [['Coimbatore', city]] });
+        insertedBaseNames.push(cityTitleBase);
+
+        for (const site of cities[city]) {
+          const siteImage = await getImageBuffer(site.mediaImage);
+          const locationText = site.location || site.areaName || site.mediaName || '-';
+
+          const siteBase = await tpl.cloneCaptionPhotoSlide(siteDetailTpl, {
+            captionText: locationText,
+            image: siteImage,
+            relId: 'rId2',
+            boxWidthEMU: 9772650,
+            boxHeightEMU: 6005512,
+            captionAnchorMarker: '<p:cNvSpPr txBox="1">',
+          });
+          insertedBaseNames.push(siteBase);
+        }
+      }
+    }
+
+    await tpl.setFinalSlideOrder([staticFirstSlide, ...insertedBaseNames, staticLastSlide]);
+
+    const buffer = await tpl.save();
+    const clientNameSafe = sanitizePathSegment(client.name);
+    const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
+    const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+
+    try {
+      return await uploadFileToCloud(
+        buffer,
+        `${proposal.proposalId}.pptx`,
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        folder
+      );
+    } catch (uploadErr) {
+      throw new Error(`Failed to upload generated PPT to cloud storage: ${uploadErr.message}`);
+    }
+  }
+
+  if (isJagranTemplateOne) {
+    // Jagran-template-one: reference slide1 ("Coimbatore") is the city-divider template and
+    // slide2 (photo + multi-run caption "Avinashi Road Goldwins towards Airport -30x30") is the
+    // site-image template — both cloned once per city/site, in selection order, exactly like
+    // adinn-photos-only/Jagran-template-two. Slides 3-6 in the reference file are extra filled-in
+    // example content (not a distinct "Thank You" slide), so — like Jagran-template-two's own
+    // unused middle demo slides — they're simply never referenced in the final slide order below
+    // and stay as orphaned, ignored parts of the package. If a future master upload adds a real
+    // closing slide, wire it in the same way slide1/slide17 are handled for Jagran-template-two.
+    const slideFiles = await tpl.getSlideFiles();
+    const cityDividerTpl = slideFiles[0];
+    const siteDetailTpl = slideFiles[1];
+
+    const sitesByCity = {};
+    const cityOrder = [];
+    for (const site of sites) {
+      const city = site.city || 'Other';
+      if (!sitesByCity[city]) {
+        sitesByCity[city] = [];
+        cityOrder.push(city);
+      }
+      sitesByCity[city].push(site);
+    }
+
+    const insertedBaseNames = [];
+    for (const city of cityOrder) {
+      const cityDividerBase = await tpl.cloneSlide(cityDividerTpl, { textReplacements: [['Coimbatore', city]] });
+      insertedBaseNames.push(cityDividerBase);
+
+      for (const site of sitesByCity[city]) {
+        const siteImage = await getImageBuffer(site.mediaImage);
+        const locationText = site.location || site.areaName || site.mediaName || '-';
+        const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
+        const captionText = sizeLabel ? `${locationText} -${sizeLabel}` : locationText;
+
+        const siteBase = await tpl.cloneCaptionPhotoSlide(siteDetailTpl, {
+          captionText,
+          image: siteImage,
+          boxWidthEMU: 8072494,
+          boxHeightEMU: 4982010,
+        });
+        insertedBaseNames.push(siteBase);
+      }
+    }
+
+    await tpl.setFinalSlideOrder(insertedBaseNames);
+
+    const buffer = await tpl.save();
+    const clientNameSafe = sanitizePathSegment(client.name);
+    const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
+    const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+
+    try {
+      return await uploadFileToCloud(
+        buffer,
+        `${proposal.proposalId}.pptx`,
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        folder
+      );
+    } catch (uploadErr) {
+      throw new Error(`Failed to upload generated PPT to cloud storage: ${uploadErr.message}`);
+    }
+  }
+
+  if (isJagranTemplateTwo) {
+    // Jagran-template-two: reference slide1 ("Jagran Engage" title) and the last slide
+    // ("Thank you") are kept verbatim — no cloning, no text/image mutation. slide2 is the
+    // city-divider template (single red city-name textbox); slide4 is used as the site-detail
+    // template because its reference Width/Height values (35.00/25.00) are distinct, unlike
+    // slide3's duplicate 20.00/20.00 — exact-text replacement can then target each field
+    // unambiguously. Both are cloned once per city/site, in the user's selection order, the
+    // same way adinn-photos-only clones its city-divider + site-photo pair.
+    const slideFiles = await tpl.getSlideFiles();
+    const staticFirstSlide = slideFiles[0];
+    const staticLastSlide = slideFiles[slideFiles.length - 1];
+    const cityDividerTpl = 'slide2';
+    const siteDetailTpl = 'slide4';
+
+    const sitesByCity = {};
+    const cityOrder = [];
+    for (const site of sites) {
+      const city = site.city || 'Other';
+      if (!sitesByCity[city]) {
+        sitesByCity[city] = [];
+        cityOrder.push(city);
+      }
+      sitesByCity[city].push(site);
+    }
+
+    const insertedBaseNames = [];
+    for (const city of cityOrder) {
+      const cityDividerBase = await tpl.cloneSlide(cityDividerTpl, {
+        textReplacements: [['Chennai', city]],
+        preserveRedShapes: true,
+      });
+      insertedBaseNames.push(cityDividerBase);
+
+      for (const site of sitesByCity[city]) {
+        const siteImage = await getImageBuffer(site.mediaImage);
+        const locationText = site.location || site.areaName || site.mediaName || '-';
+        const widthText = site.width != null ? Number(site.width).toFixed(2) : '-';
+        const heightText = site.height != null ? Number(site.height).toFixed(2) : '-';
+
+        const siteBase = await tpl.cloneSlide(siteDetailTpl, {
+          textReplacements: [
+            ['Porur EB Office towards Porur Signal', locationText],
+            ['Tamil Nadu', site.state || '-'],
+            ['Chennai', site.city || '-'],
+            ['Hoarding', site.mediaType || '-'],
+            ['Not Lit', site.illumination || '-'],
+            ['35.00', widthText],
+            ['25.00', heightText],
+          ],
+          imageReplacements: siteImage ? [siteImage] : [],
+        });
+        insertedBaseNames.push(siteBase);
+      }
+    }
+
+    await tpl.setFinalSlideOrder([staticFirstSlide, ...insertedBaseNames, staticLastSlide]);
 
     const buffer = await tpl.save();
     const clientNameSafe = sanitizePathSegment(client.name);

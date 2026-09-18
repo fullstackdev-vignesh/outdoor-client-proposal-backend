@@ -163,8 +163,12 @@ class PptxTemplate {
     let slideXml = await this.readText(slidePath);
     let relsXml = this.zip.file(relsPath) ? await this.readText(relsPath) : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
 
-    // Remove red highlight boxes from template slide
-    slideXml = removeRedHighlightShapes(slideXml);
+    // Remove red highlight boxes from template slide. Some templates (e.g. Jagran-template-two's
+    // city-divider slide) use red as an actual text color rather than an annotation overlay, so
+    // that shape must be preserved — mutations.preserveRedShapes opts out for those slides only.
+    if (!mutations.preserveRedShapes) {
+      slideXml = removeRedHighlightShapes(slideXml);
+    }
 
     // 1. Exact text replacements
     for (const [oldText, newText] of mutations.textReplacements || []) {
@@ -319,6 +323,67 @@ class PptxTemplate {
       const target = `<a:blip r:embed="${relId}" cstate="print"><a:lum/></a:blip><a:srcRect/><a:stretch><a:fillRect/></a:stretch>`;
       const replacement = `<a:blip r:embed="${relId}" cstate="print"><a:lum/></a:blip><a:srcRect l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"/><a:stretch><a:fillRect/></a:stretch>`;
       slideXml = slideXml.replace(target, replacement);
+    }
+
+    return this._registerClonedSlide(slideXml, relsXml);
+  }
+
+  // Shared by Jagran-template-one and publicis-ooh-template's site-image slide: a picture
+  // placeholder plus a caption shape whose text is split across several runs purely as a
+  // spell-check artifact in the reference files (every run shares identical rPr — sz/bold/font).
+  // Rather than relying on literal old-value text matching (fragile once the split varies), the
+  // whole caption paragraph is collapsed into a single new run that reuses the first run's rPr.
+  // `captionAnchorMarker` is the structural tag (unique per template) that identifies which
+  // <p:sp> is the caption — Jagran-template-one's caption is a placeholder shape (p:ph type=
+  // "body"), publicis-ooh-template's is a plain manually-inserted textbox (p:cNvSpPr txBox="1")
+  // — so it defaults to the former to keep existing Jagran-template-one behavior unchanged.
+  async cloneCaptionPhotoSlide(
+    templateBaseName,
+    { captionText, image, relId = 'rId3', boxWidthEMU, boxHeightEMU, captionAnchorMarker = '<p:ph type="body"[^>]*/>' } = {}
+  ) {
+    const slidePath = `ppt/slides/${templateBaseName}.xml`;
+    const relsPath = `ppt/slides/_rels/${templateBaseName}.xml.rels`;
+
+    let slideXml = await this.readText(slidePath);
+    let relsXml = await this.readText(relsPath);
+
+    const captionShapeRe = new RegExp(
+      `(<p:sp>(?:(?!<\\/p:sp>)[\\s\\S])*?${captionAnchorMarker}[\\s\\S]*?<p:txBody>)([\\s\\S]*?)(<\\/p:txBody>[\\s\\S]*?<\\/p:sp>)`
+    );
+    const shapeMatch = slideXml.match(captionShapeRe);
+    if (shapeMatch) {
+      const txBodyInner = shapeMatch[2];
+      const bodyPr = (txBodyInner.match(/<a:bodyPr\/>|<a:bodyPr[^>]*\/>|<a:bodyPr[^>]*>[\s\S]*?<\/a:bodyPr>/) || [])[0] || '<a:bodyPr/>';
+      const lstStyle = (txBodyInner.match(/<a:lstStyle\/>|<a:lstStyle>[\s\S]*?<\/a:lstStyle>/) || [])[0] || '<a:lstStyle/>';
+      const pPr = (txBodyInner.match(/<a:pPr[^>]*\/>|<a:pPr[^>]*>[\s\S]*?<\/a:pPr>/) || [])[0] || '';
+      let rPr = (txBodyInner.match(/<a:rPr[^>]*\/>|<a:rPr[^>]*>[\s\S]*?<\/a:rPr>/) || [])[0] || '<a:rPr lang="en-US"/>';
+      rPr = rPr.replace(/\s(err|smtClean)="1"/g, '');
+      const newTxBody = `${bodyPr}${lstStyle}<a:p>${pPr}<a:r>${rPr}<a:t>${xmlEscape(captionText)}</a:t></a:r></a:p>`;
+      slideXml = slideXml.replace(shapeMatch[0], `${shapeMatch[1]}${newTxBody}${shapeMatch[3]}`);
+    }
+
+    if (image && image.buffer) {
+      const newTarget = await this.addMediaFile(image.buffer, image.ext);
+      relsXml = this.replaceRelTarget(relsXml, relId, newTarget);
+
+      const dims = getImageDimensions(image.buffer, image.ext);
+      const rect = dims ? computeCoverFillRect(dims.width, dims.height, boxWidthEMU, boxHeightEMU) : { l: 0, t: 0, r: 0, b: 0 };
+
+      // The blip element is self-closing in some templates (Jagran-template-one) but has child
+      // elements (e.g. a useLocalDpi hint) in others (publicis-ooh-template), so both forms of
+      // its closing tag are tried, preferring the explicit "</a:blip>" close when present.
+      const blipCloseRe = new RegExp(`<a:blip r:embed="${relId}"[\\s\\S]*?<\\/a:blip>`);
+      const blipSelfCloseRe = new RegExp(`<a:blip r:embed="${relId}"[^/]*/>`);
+      const blipMatch = slideXml.match(blipCloseRe) || slideXml.match(blipSelfCloseRe);
+      if (blipMatch) {
+        const afterBlip = slideXml.slice(blipMatch.index + blipMatch[0].length);
+        const srcRectMatch = afterBlip.match(/^<a:srcRect[^/]*\/>/);
+        const oldLength = blipMatch[0].length + (srcRectMatch ? srcRectMatch[0].length : 0);
+        const replacement =
+          `<a:blip r:embed="${relId}" cstate="print"/>` +
+          `<a:srcRect l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"/>`;
+        slideXml = slideXml.slice(0, blipMatch.index) + replacement + slideXml.slice(blipMatch.index + oldLength);
+      }
     }
 
     return this._registerClonedSlide(slideXml, relsXml);
