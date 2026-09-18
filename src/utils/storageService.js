@@ -43,6 +43,13 @@ async function uploadFile(fileOrBuffer, originalName, mimeType, subFolder = 'med
         Body: buffer,
         ACL: 'public-read',
         ContentType: mimeType || 'application/octet-stream',
+        // Baked into the object's own metadata (not a query param) — DO Spaces then returns
+        // this Content-Disposition on every request for the object's public URL, forever, so
+        // the browser Save-As name is correct regardless of which frontend code path/cache
+        // served the link. Without this, cloud-stored files always download under their
+        // randomized physical filename (see buildFileName) since there's no local Express
+        // route in front of them to attach headers at request time.
+        ContentDisposition: `attachment; filename="${String(originalName || fileName).replace(/["\r\n]/g, '')}"`,
       })
     );
 

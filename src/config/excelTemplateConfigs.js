@@ -91,12 +91,22 @@ const JAGRAN_EXCEL_1 = {
   hasTermsAfterTotal: false,
   columns: JAGRAN_COLUMNS,
   totalColumns: JAGRAN_TOTAL_COLUMNS,
+  // The uploaded template's own header cell says "Media Vehicle" — shown as "Media Type"
+  // instead, without touching the original uploaded file (only this generated copy).
+  headerRenames: [{ cell: 'D2', text: 'Media Type' }],
+  // "Sq. ft" (Area, column I) ships with a narrow auto-fit width that shows "#####" once real
+  // numbers are written in — widened so the value is actually visible.
+  columnWidths: [{ col: 'I', width: 12 }],
 };
 
 const JAGRAN_EXCEL_2 = {
   ...JAGRAN_EXCEL_1,
   lastDataRow: 9,
   totalRow: 11,
+  // Format 2's sheet has two extra columns format 1 doesn't (T Availability, U Rationale) —
+  // Availability had no Site field mapped to it, so it just showed blank; map it to the
+  // site's current status (Available/Booked/Blocked). Rationale (U) is left untouched.
+  columns: { ...JAGRAN_COLUMNS, siteStatus: 'T' },
 };
 
 const EXCEL_CONFIGS = {

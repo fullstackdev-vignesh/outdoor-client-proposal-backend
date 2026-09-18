@@ -155,6 +155,36 @@ function insertCellInRow(sheetXml, rowNum, cellRef, cellXml) {
   return sheetXml.slice(0, m.index) + openTag + newInner + closeTag + sheetXml.slice(m.index + whole.length);
 }
 
+// Widens an existing <col> width entry for one column letter (or adds one if the sheet
+// never explicitly defined that column's width) — cosmetic only, doesn't move any cells.
+function setColumnWidth(sheetXml, colLetter, width) {
+  const num = colToNum(colLetter);
+  let found = false;
+  sheetXml = sheetXml.replace(/<col ([^>]*)\/>/g, (whole, attrs) => {
+    const minM = attrs.match(/min="(\d+)"/);
+    const maxM = attrs.match(/max="(\d+)"/);
+    if (!minM || !maxM) return whole;
+    const min = Number(minM[1]);
+    const max = Number(maxM[1]);
+    if (num < min || num > max) return whole;
+    found = true;
+    if (min === max) {
+      let newAttrs = attrs.replace(/\scustomWidth="[^"]*"/, '');
+      newAttrs = newAttrs.includes('width="') ? newAttrs.replace(/width="[^"]*"/, `width="${width}"`) : `${newAttrs} width="${width}"`;
+      return `<col ${newAttrs} customWidth="1"/>`;
+    }
+    // This column shares a multi-column range with others — leave the range alone and add a
+    // dedicated single-column override for just this one (inserted right after, so it wins).
+    return `${whole}<col min="${num}" max="${num}" width="${width}" customWidth="1"/>`;
+  });
+  if (!found) {
+    sheetXml = sheetXml.includes('<cols>')
+      ? sheetXml.replace('</cols>', `<col min="${num}" max="${num}" width="${width}" customWidth="1"/></cols>`)
+      : sheetXml.replace(/(<sheetData)/, `<cols><col min="${num}" max="${num}" width="${width}" customWidth="1"/></cols>$1`);
+  }
+  return sheetXml;
+}
+
 function addMergeCell(sheetXml, ref) {
   if (!sheetXml.includes('<mergeCells')) return sheetXml;
   return sheetXml
@@ -398,6 +428,17 @@ async function generateExcelFromTemplate(rows, { buffer, config, client } = {}) 
   const usable = rows.slice(0, maxSites);
 
   sheetXml = cfg.mode === 'block-per-site' ? fillBlockPerSite(sheetXml, usable, cfg) : fillRowPerSite(sheetXml, usable, cfg);
+
+  // Cosmetic header-cell overrides — e.g. the uploaded template's own header says "Media
+  // Vehicle", shown as "Media Type" instead, without touching the original uploaded file.
+  for (const { cell, text } of cfg.headerRenames || []) {
+    sheetXml = setCell(sheetXml, cell, text, { text: true });
+  }
+  // Widen columns whose auto-fit width is too narrow to show real values (e.g. Area shows
+  // "#####" once real numbers replace the blank template cells).
+  for (const { col, width } of cfg.columnWidths || []) {
+    sheetXml = setColumnWidth(sheetXml, col, width);
+  }
 
   // Collapsing turns each used site's 2-row block into a single visible row (deleting the
   // block's 2nd row rather than leaving it blank/zeroed) — every row number at/after

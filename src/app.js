@@ -21,8 +21,20 @@ app.use(express.urlencoded({ extended: true }));
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
-app.use('/generated', express.static(path.join(__dirname, '..', 'generated')));
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+// Generated proposal files are stored under a randomized, collision-safe physical filename
+// (see storageService.js) — a `?download=` query param lets a link force the browser's Save
+// dialog to use the real human-readable name instead, straight from the server, so it works
+// regardless of which frontend code path served the link (plain <a>, fetch+blob, cached JS).
+function withDownloadName(req, res, next) {
+  const name = req.query.download;
+  if (name) {
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(String(name))}"`);
+  }
+  next();
+}
+
+app.use('/generated', withDownloadName, express.static(path.join(__dirname, '..', 'generated')));
+app.use('/uploads', withDownloadName, express.static(path.join(__dirname, '..', 'uploads')));
 
 app.use('/admin', authRoutes);
 app.use('/api/auth', authRoutes);
