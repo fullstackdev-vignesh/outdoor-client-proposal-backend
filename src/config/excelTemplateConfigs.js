@@ -94,9 +94,17 @@ const JAGRAN_EXCEL_1 = {
   // The uploaded template's own header cell says "Media Vehicle" — shown as "Media Type"
   // instead, without touching the original uploaded file (only this generated copy).
   headerRenames: [{ cell: 'D2', text: 'Media Type' }],
-  // "Sq. ft" (Area, column I) ships with a narrow auto-fit width that shows "#####" once real
-  // numbers are written in — widened so the value is actually visible.
-  columnWidths: [{ col: 'I', width: 12 }],
+  // "Sq. ft" (I) ships narrow (~7.3) and needs widening for its own per-row value. "Display
+  // Cost per month" (L, ~18.4) and "Cost as per Duration" (N, ~16.1) are already wide enough
+  // for a single site's own value, but the Total row uses an accounting number format
+  // (reserves extra invisible padding for sign/parens alignment) in a bolder font, which
+  // needs more room than any individual row — so these are widened PAST their original size,
+  // not down to some flat value, or the fix would make the Total row worse, not better.
+  columnWidths: [
+    { col: 'I', width: 12 },
+    { col: 'L', width: 22 },
+    { col: 'N', width: 20 },
+  ],
 };
 
 const JAGRAN_EXCEL_2 = {
