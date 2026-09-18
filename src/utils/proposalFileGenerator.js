@@ -109,6 +109,7 @@ async function generateProposalPpt(proposal) {
   const sites = proposal.sites || [];
   const now = new Date();
   const isAdinnNewTemplate = templateName === 'adinn-new-template';
+  const isAdinnPhotosOnly = templateName === 'adinn-photos-only';
 
   await tpl.setCoverFields({
     customerLabel: customerLabel(proposal),
@@ -192,6 +193,61 @@ async function generateProposalPpt(proposal) {
       return await uploadFileToCloud(
         buffer,
         fileName,
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        folder
+      );
+    } catch (uploadErr) {
+      throw new Error(`Failed to upload generated PPT to cloud storage: ${uploadErr.message}`);
+    }
+  }
+
+  if (isAdinnPhotosOnly) {
+    // adinn-photos-only: reference slide1 is a city-divider template ("Madurai" placeholder +
+    // logo), slide2 is a single site-photo template (two-run caption + one full-bleed photo).
+    // Both are cloned as many times as needed, in the user's city/site selection order; none of
+    // the 12 reference slides are kept verbatim in the output, only their clones.
+    const sitesByCity = {};
+    const cityOrder = [];
+    for (const site of sites) {
+      const city = site.city || 'Other';
+      if (!sitesByCity[city]) {
+        sitesByCity[city] = [];
+        cityOrder.push(city);
+      }
+      sitesByCity[city].push(site);
+    }
+
+    const insertedBaseNames = [];
+    for (const city of cityOrder) {
+      const cityDividerBase = await tpl.cloneSlide('slide1', { textReplacements: [['Madurai', city]] });
+      insertedBaseNames.push(cityDividerBase);
+
+      for (const site of sitesByCity[city]) {
+        const siteImage = await getImageBuffer(site.mediaImage);
+        const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
+        const locationText = site.location || site.areaName || site.mediaName || site.city || '-';
+        const photoBase = await tpl.clonePhotoOnlySlide('slide2', {
+          locationText,
+          sizeText: sizeLabel ? `  ${sizeLabel}` : '',
+          image: siteImage,
+          boxWidthEMU: 9448801,
+          boxHeightEMU: 6096000,
+        });
+        insertedBaseNames.push(photoBase);
+      }
+    }
+
+    await tpl.setFinalSlideOrder(insertedBaseNames);
+
+    const buffer = await tpl.save();
+    const clientNameSafe = sanitizePathSegment(client.name);
+    const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
+    const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+
+    try {
+      return await uploadFileToCloud(
+        buffer,
+        `${proposal.proposalId}.pptx`,
         'application/vnd.openxmlformats-officedocument.presentationml.presentation',
         folder
       );

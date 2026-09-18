@@ -296,6 +296,34 @@ class PptxTemplate {
     return this._registerClonedSlide(slideXml, relsXml);
   }
 
+  // adinn-photos-only slide2 template: one two-run caption (location run + a separate, smaller
+  // "  WxH" size run) and one full-bleed site photo. Cloned once per selected site; the caption
+  // runs and the photo's blip/srcRect are matched by their exact reference-template text/markup,
+  // so only those two things change and everything else (fonts, position, logo, etc.) is preserved.
+  async clonePhotoOnlySlide(templateBaseName, { locationText, sizeText, image, relId = 'rId3', boxWidthEMU, boxHeightEMU } = {}) {
+    const slidePath = `ppt/slides/${templateBaseName}.xml`;
+    const relsPath = `ppt/slides/_rels/${templateBaseName}.xml.rels`;
+
+    let slideXml = await this.readText(slidePath);
+    let relsXml = await this.readText(relsPath);
+
+    slideXml = slideXml.replace('<a:t>Yanaikkal junction</a:t>', `<a:t>${xmlEscape(locationText)}</a:t>`);
+    slideXml = slideXml.replace('<a:t>  20x20</a:t>', `<a:t>${xmlEscape(sizeText)}</a:t>`);
+
+    if (image && image.buffer) {
+      const newTarget = await this.addMediaFile(image.buffer, image.ext);
+      relsXml = this.replaceRelTarget(relsXml, relId, newTarget);
+
+      const dims = getImageDimensions(image.buffer, image.ext);
+      const rect = dims ? computeCoverFillRect(dims.width, dims.height, boxWidthEMU, boxHeightEMU) : { l: 0, t: 0, r: 0, b: 0 };
+      const target = `<a:blip r:embed="${relId}" cstate="print"><a:lum/></a:blip><a:srcRect/><a:stretch><a:fillRect/></a:stretch>`;
+      const replacement = `<a:blip r:embed="${relId}" cstate="print"><a:lum/></a:blip><a:srcRect l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"/><a:stretch><a:fillRect/></a:stretch>`;
+      slideXml = slideXml.replace(target, replacement);
+    }
+
+    return this._registerClonedSlide(slideXml, relsXml);
+  }
+
   async setCoverFields({ customerLabel, dateLabel }) {
     let slideXml = await this.readText('ppt/slides/slide1.xml');
     slideXml = slideXml.replace(/<a:t>[^<]*<\/a:t>/g, (match) => {
