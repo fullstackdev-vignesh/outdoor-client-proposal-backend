@@ -189,6 +189,9 @@ function normalizeSiteBody(body) {
       delete payload.bookings;
     }
   }
+  // Optional Site Info dropdown submits '' when left unselected — an empty string fails
+  // ObjectId casting, so treat it the same as "not provided".
+  if (payload.siteInfoId === '') delete payload.siteInfoId;
   return payload;
 }
 

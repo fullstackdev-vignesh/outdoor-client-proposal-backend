@@ -60,7 +60,7 @@ const MASTER_FIELDS = [
   'mediaId', 'mediaName', 'mediaType', 'quantity', 'state', 'city', 'location', 'areaName',
   'locationDetails', 'siteOwner', 'latitude', 'longitude', 'illumination', 'width', 'height',
   'sizeUnit', 'autoSize', 'amount', 'gstAmount', 'monthlyAmount', 'printingCost', 'mountingCost',
-  'totalCost', 'mediaImage',
+  'totalCost', 'mediaImage', 'siteInfoId',
 ];
 
 // Fields that represent live Inventory/status/booking state — changing any of these bumps
@@ -93,6 +93,10 @@ const siteSchema = new mongoose.Schema(
     mountingCost: { type: Number, min: 0, default: 0 },
     totalCost: { type: Number, min: 0 },
     mediaImage: String,
+    // Optional link to a reusable Site Info card (title + description) shown on PPT templates
+    // that support it (e.g. Adinn-Direct-Client-format). Only the reference is stored here —
+    // the actual title/description text lives on the SiteInfo document, never duplicated here.
+    siteInfoId: { type: mongoose.Schema.Types.ObjectId, ref: 'SiteInfo', default: null },
     isActive: { type: Boolean, default: true },
     mediaStatus: {
       type: String,

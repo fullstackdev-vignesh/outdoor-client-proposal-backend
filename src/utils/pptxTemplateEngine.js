@@ -242,12 +242,42 @@ class PptxTemplate {
   // images: [{ relId, buffer, ext, boxWidthEMU, boxHeightEMU }]
   // clearImageRelId: relationship id whose blipFill should become empty (map placeholder)
   // placeholderText: { offX, offY, extCx, extCy, text } — new centered textbox for that empty area
-  async cloneAdinnSiteSlide(templateBaseName, { textReplacements = [], images = [], clearImageRelId, placeholderText, boxWidths = [] } = {}) {
+  // removeGroupNames: names of top-level <p:grpSp> shapes to drop entirely (e.g.
+  // Adinn-Direct-Client-format's Site Information card background when the site has none set).
+  // removeShapesAtOffset: plain <p:sp> shapes to drop, matched by their exact <a:off y>/<a:ext cy>
+  // (that card's description text is a separate sibling shape, not nested inside the group, and
+  // its content/x-position vary per example, so position is the only stable match). Both default
+  // to empty so existing callers (adinn-new-template) are unaffected.
+  async cloneAdinnSiteSlide(
+    templateBaseName,
+    {
+      textReplacements = [],
+      images = [],
+      clearImageRelId,
+      placeholderText,
+      boxWidths = [],
+      removeGroupNames = [],
+      removeShapesAtOffset = [],
+    } = {}
+  ) {
     const slidePath = `ppt/slides/${templateBaseName}.xml`;
     const relsPath = `ppt/slides/_rels/${templateBaseName}.xml.rels`;
 
     let slideXml = await this.readText(slidePath);
     let relsXml = await this.readText(relsPath);
+
+    for (const groupName of removeGroupNames) {
+      const groupRe = /<p:grpSp>(?:(?!<\/p:grpSp>)[\s\S])*?<\/p:grpSp>/g;
+      slideXml = slideXml.replace(groupRe, (block) => (block.includes(`name="${groupName}"`) ? '' : block));
+    }
+
+    for (const { offY, extCy } of removeShapesAtOffset) {
+      const shapeRe = /<p:sp>(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g;
+      const marker = `y="${offY}"/><a:ext cx="`;
+      slideXml = slideXml.replace(shapeRe, (block) =>
+        block.includes(marker) && block.includes(`cy="${extCy}"/>`) ? '' : block
+      );
+    }
 
     for (const [oldText, newText] of textReplacements) {
       const target = `<a:t>${oldText}</a:t>`;
@@ -406,6 +436,20 @@ class PptxTemplate {
     let slideXml = await this.readText('ppt/slides/slide1.xml');
     slideXml = slideXml.replace(/<a:t>ate:\s*[^<]*<\/a:t>/, `<a:t>ate: ${xmlEscape(dateLabel)}</a:t>`);
     this.writeText('ppt/slides/slide1.xml', slideXml);
+  }
+
+  // Adinn-Direct-Client-format's slide1 stores its demo customer name ("HAVELLS") as a single
+  // plain run, not wrapped in any of the "Maxi Vision"/"Hospital"/"Proposal" keywords that
+  // setCoverFields matches against (that matching was written for adinn-new-template's own demo
+  // content) — so it never got swapped for the selected client's name. Replaced directly here,
+  // by that exact literal reference-template text, instead.
+  async setCoverCustomerNameLiteral(oldText, customerLabel) {
+    let slideXml = await this.readText('ppt/slides/slide1.xml');
+    const target = `<a:t>${oldText}</a:t>`;
+    if (slideXml.includes(target)) {
+      slideXml = slideXml.replace(target, `<a:t>${xmlEscape(customerLabel)}</a:t>`);
+      this.writeText('ppt/slides/slide1.xml', slideXml);
+    }
   }
 
   // Widens (and optionally re-centers) a single textbox on a given slide part, matched by its

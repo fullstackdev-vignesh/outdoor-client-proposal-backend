@@ -113,11 +113,94 @@ async function generateProposalPpt(proposal) {
   const isJagranTemplateTwo = templateName === 'Jagran-template-two';
   const isJagranTemplateOne = templateName === 'Jagran-template-one';
   const isPublicisOohTemplate = templateName === 'publicis-ooh-template';
+  const isAdinnDirectClientFormat = templateName === 'Adinn-Direct-Client-format';
 
   await tpl.setCoverFields({
     customerLabel: customerLabel(proposal),
     dateLabel: formatDisplayDate(now),
   });
+
+  if (isAdinnDirectClientFormat) {
+    // Adinn-Direct-Client-format: same visual family and generation approach as
+    // adinn-new-template (cover/about/why-us kept as-is, slide4 cloned once per site), but its
+    // site-spec slide has no Illumination/Unit fields and no separate site+map slide — instead
+    // it has one extra "Site Information" card (a gradient rounded-rect + description text)
+    // reused from the SiteInfo master data optionally linked on the site. When a site has no
+    // siteInfoId, the whole card group is removed so the spec area stays clean (no empty box).
+    await tpl.setCoverDateLabel(formatDisplayDate(now));
+    await tpl.setCoverCustomerNameLiteral('HAVELLS', customerLabel(proposal));
+    await tpl.resizeTextBox('ppt/slides/slide2.xml', {
+      offX: 7609014,
+      offY: 2436416,
+      newOffX: 7500000,
+      newWidthEMU: 3150000,
+    });
+
+    const slideFiles = await tpl.getSlideFiles();
+    // slide5/slide6 in the reference file are two more filled-in example site slides (not a
+    // distinct template role) — like Jagran-template-two's unused middle demo slides, they're
+    // excluded here so only the real trailing content (slide7, "Thank You") survives into
+    // `remainingSlides` and gets appended after the per-site clones.
+    const remainingSlides = slideFiles.filter((f) => !['slide1', 'slide2', 'slide3', 'slide4', 'slide5', 'slide6'].includes(f));
+
+    // Same label/value textbox widths as adinn-new-template's City/Size/Media type rows —
+    // identical offsets in this template — minus the Illumination/Unit rows it doesn't have.
+    const DIRECT_CLIENT_BOX_WIDTHS = ADINN_MEDIA_SPEC_BOX_WIDTHS.filter(
+      (b) => ![7020816, 8414641, 8408521].includes(b.offY)
+    );
+
+    const siteSlideBaseNames = [];
+    for (const site of sites) {
+      const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
+      const titleText = site.location || site.areaName || site.mediaName || site.city || '';
+      const siteImage = await getImageBuffer(site.mediaImage);
+      const siteInfo = site.siteInfoId && typeof site.siteInfoId === 'object' ? site.siteInfoId : null;
+
+      const textReplacements = [
+        ['Little Mount (Chinnamalai) Towards sardar patel rd, adyar/FL', titleText],
+        ['Chennai', site.city || '-'],
+        ['25x25', sizeLabel || '-'],
+        ['Unipole', site.mediaType || '-'],
+      ];
+      if (siteInfo?.description) {
+        textReplacements.push([
+          'This site is strategically important due to heavy daily traffic and strong visibility from multiple approach directions, ensuring high audience exposure.',
+          siteInfo.description,
+        ]);
+      }
+
+      const slide4Base = await tpl.cloneAdinnSiteSlide('slide4', {
+        textReplacements,
+        images: siteImage ? [{ relId: 'rId6', ...siteImage, boxWidthEMU: 11366193, boxHeightEMU: 7736815 }] : [],
+        boxWidths: DIRECT_CLIENT_BOX_WIDTHS,
+        removeGroupNames: siteInfo?.description ? [] : ['Group 29'],
+        removeShapesAtOffset: siteInfo?.description ? [] : [{ offY: 7117158, extCy: 1416150 }],
+      });
+      siteSlideBaseNames.push(slide4Base);
+    }
+
+    await tpl.setFinalSlideOrder(['slide1', 'slide2', 'slide3', ...siteSlideBaseNames, ...remainingSlides]);
+
+    const buffer = await tpl.save();
+    const clientNameSafe = sanitizePathSegment(client.name);
+    const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
+    const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+    const dd = String(now.getDate()).padStart(2, '0');
+    const monthWords = now.toLocaleString('en-US', { month: 'long' });
+    const yyyy = now.getFullYear();
+    const fileName = `${clientNameSafe}-${dd}-${monthWords}-${yyyy}-${proposal.proposalId}.pptx`;
+
+    try {
+      return await uploadFileToCloud(
+        buffer,
+        fileName,
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        folder
+      );
+    } catch (uploadErr) {
+      throw new Error(`Failed to upload generated PPT to cloud storage: ${uploadErr.message}`);
+    }
+  }
 
   if (isAdinnNewTemplate) {
     // adinn-new-template: slide 1 date/name, slides 2-3 preserved as-is (implemented earlier).

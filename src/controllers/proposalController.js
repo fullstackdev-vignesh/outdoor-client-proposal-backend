@@ -127,7 +127,7 @@ const duplicateProposal = asyncHandler(async (req, res) => {
 const generatePpt = asyncHandler(async (req, res) => {
   const proposal = await Proposal.findById(req.params.id)
     .populate('client')
-    .populate('sites')
+    .populate({ path: 'sites', populate: { path: 'siteInfoId' } })
     .populate('pptTemplate');
   if (!proposal) {
     res.status(404);
