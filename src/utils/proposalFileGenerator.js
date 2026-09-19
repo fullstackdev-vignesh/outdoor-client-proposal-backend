@@ -66,6 +66,18 @@ function formatDisplayDate(date) {
   return new Intl.DateTimeFormat('en-US', { day: '2-digit', month: 'short', year: 'numeric' }).format(date);
 }
 
+// Shared generated-PPTX file name convention across every template: "<Client>-<DD>-<Month>-
+// <YYYY>-<proposalId>.pptx" (e.g. "ROTN-19-September-2026-PR-MU83CUXH.pptx"), using today's
+// date at generation time — not the proposal's original creation date (that's only used for the
+// cloud storage folder segment, so a regenerate overwrites the same folder/object).
+function buildGeneratedPptFileName(proposal, client, now) {
+  const clientNameSafe = sanitizePathSegment(client.name);
+  const dd = String(now.getDate()).padStart(2, '0');
+  const monthWords = now.toLocaleString('en-US', { month: 'long' });
+  const yyyy = now.getFullYear();
+  return `${clientNameSafe}-${dd}-${monthWords}-${yyyy}-${proposal.proposalId}.pptx`;
+}
+
 async function generateProposalPpt(proposal) {
   if (!proposal.client) {
     throw new Error('Selected client could not be found for this proposal');
@@ -114,11 +126,95 @@ async function generateProposalPpt(proposal) {
   const isJagranTemplateOne = templateName === 'Jagran-template-one';
   const isPublicisOohTemplate = templateName === 'publicis-ooh-template';
   const isAdinnDirectClientFormat = templateName === 'Adinn-Direct-Client-format';
+  const isAdinnCustomizedFormat = templateName === 'adinn-customized-format';
 
   await tpl.setCoverFields({
     customerLabel: customerLabel(proposal),
     dateLabel: formatDisplayDate(now),
   });
+
+  if (isAdinnCustomizedFormat) {
+    // adinn-customized-format: reference slide1/slide2 are meant to be blank pages the user
+    // fills in manually later, but the uploaded file has a past client's full-slide cover image
+    // baked into each as its background — cleared to plain white here so every generated
+    // proposal starts genuinely blank, regardless of what was in the source file. slide3 is the
+    // site-detail template (two image boxes — rId2 large, rId3 smaller — both showing the same
+    // site photo, plus a single-run title combining location and size), cloned once per selected
+    // site using the same cloneAdinnSiteSlide image-swap logic as adinn-new-template. slide4 in
+    // the reference file is just a second filled-in example of the identical layout (not a
+    // distinct role, unlike adinn-new-template's spec/map pairing), so — like the extra demo
+    // slides ignored in other templates — it's never referenced in the final slide order. slide5
+    // ("Thank You") is the real closing slide, kept verbatim at the end. The right-hand box
+    // (rId3) shows a real route map (client -> site), fetched the same way as adinn-new-template's
+    // site+map slide, instead of duplicating the site photo; when either point lacks coordinates
+    // it falls back to the same "Insert your map image here" placeholder adinn-new-template uses.
+    await tpl.clearBackgroundImage('ppt/slides/slide1.xml', 'rId2');
+    await tpl.clearBackgroundImage('ppt/slides/slide2.xml', 'rId2');
+
+    const slideFiles = await tpl.getSlideFiles();
+    const staticFirstSlides = ['slide1', 'slide2'];
+    const siteDetailTpl = 'slide3';
+    const staticLastSlide = slideFiles[slideFiles.length - 1];
+
+    const siteSlideBaseNames = [];
+    for (const site of sites) {
+      const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
+      const locationText = site.location || site.areaName || site.mediaName || site.city || '';
+      const titleText = sizeLabel ? `${locationText} – ${sizeLabel}` : locationText;
+      const siteImage = await getImageBuffer(site.mediaImage);
+
+      const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
+      let mapImage = null;
+      if (hasCoords) {
+        const mapBuffer = await getRouteMapBuffer({
+          fromLat: client.latitude,
+          fromLng: client.longitude,
+          toLat: site.latitude,
+          toLng: site.longitude,
+        });
+        if (mapBuffer) mapImage = { buffer: mapBuffer, ext: 'png' };
+      }
+
+      const images = [];
+      if (siteImage) images.push({ relId: 'rId2', ...siteImage, boxWidthEMU: 10576310, boxHeightEMU: 7076491 });
+      if (mapImage) images.push({ relId: 'rId3', ...mapImage, boxWidthEMU: 5775471, boxHeightEMU: 7076491 });
+
+      const slideBase = await tpl.cloneAdinnSiteSlide(siteDetailTpl, {
+        textReplacements: [['OMR Padur Nr. Hindustan College twds Solinganallur – 30x25', titleText]],
+        images,
+        clearImageRelId: mapImage ? undefined : 'rId3',
+        placeholderText: mapImage
+          ? undefined
+          : {
+              offX: 11739398,
+              offY: 2105609,
+              extCx: 5775471,
+              extCy: 7076491,
+              text: 'Insert your map image here',
+            },
+      });
+      siteSlideBaseNames.push(slideBase);
+    }
+
+    await tpl.setFinalSlideOrder([...staticFirstSlides, ...siteSlideBaseNames, staticLastSlide]);
+
+    const buffer = await tpl.save();
+    const clientNameSafe = sanitizePathSegment(client.name);
+    const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
+    const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+    const fileName = buildGeneratedPptFileName(proposal, client, now);
+
+    try {
+      return await uploadFileToCloud(
+        buffer,
+        fileName,
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        folder
+      );
+    } catch (uploadErr) {
+      throw new Error(`Failed to upload generated PPT to cloud storage: ${uploadErr.message}`);
+    }
+  }
 
   if (isAdinnDirectClientFormat) {
     // Adinn-Direct-Client-format: same visual family and generation approach as
@@ -185,10 +281,7 @@ async function generateProposalPpt(proposal) {
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
     const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
-    const dd = String(now.getDate()).padStart(2, '0');
-    const monthWords = now.toLocaleString('en-US', { month: 'long' });
-    const yyyy = now.getFullYear();
-    const fileName = `${clientNameSafe}-${dd}-${monthWords}-${yyyy}-${proposal.proposalId}.pptx`;
+    const fileName = buildGeneratedPptFileName(proposal, client, now);
 
     try {
       return await uploadFileToCloud(
@@ -270,10 +363,7 @@ async function generateProposalPpt(proposal) {
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
     const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
-    const dd = String(now.getDate()).padStart(2, '0');
-    const monthWords = now.toLocaleString('en-US', { month: 'long' });
-    const yyyy = now.getFullYear();
-    const fileName = `${clientNameSafe}-${dd}-${monthWords}-${yyyy}-${proposal.proposalId}.pptx`;
+    const fileName = buildGeneratedPptFileName(proposal, client, now);
 
     try {
       return await uploadFileToCloud(
@@ -329,11 +419,12 @@ async function generateProposalPpt(proposal) {
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
     const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+    const fileName = buildGeneratedPptFileName(proposal, client, now);
 
     try {
       return await uploadFileToCloud(
         buffer,
-        `${proposal.proposalId}.pptx`,
+        fileName,
         'application/vnd.openxmlformats-officedocument.presentationml.presentation',
         folder
       );
@@ -410,11 +501,12 @@ async function generateProposalPpt(proposal) {
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
     const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+    const fileName = buildGeneratedPptFileName(proposal, client, now);
 
     try {
       return await uploadFileToCloud(
         buffer,
-        `${proposal.proposalId}.pptx`,
+        fileName,
         'application/vnd.openxmlformats-officedocument.presentationml.presentation',
         folder
       );
@@ -474,11 +566,12 @@ async function generateProposalPpt(proposal) {
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
     const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+    const fileName = buildGeneratedPptFileName(proposal, client, now);
 
     try {
       return await uploadFileToCloud(
         buffer,
-        `${proposal.proposalId}.pptx`,
+        fileName,
         'application/vnd.openxmlformats-officedocument.presentationml.presentation',
         folder
       );
@@ -548,11 +641,12 @@ async function generateProposalPpt(proposal) {
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
     const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+    const fileName = buildGeneratedPptFileName(proposal, client, now);
 
     try {
       return await uploadFileToCloud(
         buffer,
-        `${proposal.proposalId}.pptx`,
+        fileName,
         'application/vnd.openxmlformats-officedocument.presentationml.presentation',
         folder
       );
@@ -671,12 +765,13 @@ async function generateProposalPpt(proposal) {
   const clientNameSafe = sanitizePathSegment(client.name);
   const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : new Date()).toISOString().slice(0, 10);
   const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+  const fileName = buildGeneratedPptFileName(proposal, client, now);
 
   let pptUrl;
   try {
     pptUrl = await uploadFileToCloud(
       buffer,
-      `${proposal.proposalId}.pptx`,
+      fileName,
       'application/vnd.openxmlformats-officedocument.presentationml.presentation',
       folder
     );

@@ -452,6 +452,18 @@ class PptxTemplate {
     }
   }
 
+  // adinn-customized-format's slide1/slide2 are meant to be blank pages the user fills in
+  // manually later, but the uploaded reference file has a full-bleed picture (a past client's
+  // cover design) baked into each as their background fill — this clears that image, turning
+  // the shape into a plain white fill, while leaving every other shape on the slide (borders,
+  // decorative frames) untouched.
+  async clearBackgroundImage(slidePath, relId) {
+    let slideXml = await this.readText(slidePath);
+    const re = new RegExp(`<a:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></a:blipFill>`);
+    slideXml = slideXml.replace(re, '<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>');
+    this.writeText(slidePath, slideXml);
+  }
+
   // Widens (and optionally re-centers) a single textbox on a given slide part, matched by its
   // exact original <a:off>. Only x/width change — y, height, font, color and every other
   // element on the slide are left untouched.
