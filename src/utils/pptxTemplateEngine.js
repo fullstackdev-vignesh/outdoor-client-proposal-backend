@@ -464,6 +464,28 @@ class PptxTemplate {
     this.writeText(slidePath, slideXml);
   }
 
+  // Widens (and/or repositions) a named top-level <p:grpSp>'s own outer <a:xfrm> — used by
+  // "without location" mode to let one shape (e.g. a photo box) expand into space freed by
+  // removing another element on the same slide. Only the group's own off/ext change; everything
+  // inside the group (and every other shape on the slide) is untouched.
+  async resizeNamedGroup(slidePath, groupName, { newOffX, newWidthEMU } = {}) {
+    let slideXml = await this.readText(slidePath);
+    const groupRe = /<p:grpSp>(?:(?!<\/p:grpSp>)[\s\S])*?<\/p:grpSp>/g;
+    let match;
+    while ((match = groupRe.exec(slideXml))) {
+      if (!match[0].includes(`name="${groupName}"`)) continue;
+      const xfrmMatch = match[0].match(/<a:xfrm><a:off x="(-?\d+)" y="(-?\d+)"\/><a:ext cx="(\d+)" cy="(\d+)"\/>/);
+      if (xfrmMatch) {
+        const [full, x, y, cx, cy] = xfrmMatch;
+        const newXfrm = `<a:xfrm><a:off x="${newOffX ?? x}" y="${y}"/><a:ext cx="${newWidthEMU ?? cx}" cy="${cy}"/>`;
+        const updatedBlock = match[0].replace(full, newXfrm);
+        slideXml = slideXml.slice(0, match.index) + updatedBlock + slideXml.slice(match.index + match[0].length);
+      }
+      break;
+    }
+    this.writeText(slidePath, slideXml);
+  }
+
   // Widens (and optionally re-centers) a single textbox on a given slide part, matched by its
   // exact original <a:off>. Only x/width change — y, height, font, color and every other
   // element on the slide are left untouched.

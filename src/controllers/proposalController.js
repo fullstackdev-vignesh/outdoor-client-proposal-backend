@@ -133,8 +133,11 @@ const generatePpt = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error('Proposal not found');
   }
+  // Optional — defaults to 'with' so any existing caller that doesn't send it keeps today's
+  // exact behavior. Only 'without' triggers the location-stripped generation.
+  const locationMode = req.body?.locationMode === 'without' ? 'without' : 'with';
   try {
-    proposal.generatedPptUrl = await generateProposalPpt(proposal);
+    proposal.generatedPptUrl = await generateProposalPpt(proposal, { locationMode });
     proposal.status = proposal.generatedExcelUrl ? 'completed' : 'generated';
     await proposal.save();
     res.json(proposal);

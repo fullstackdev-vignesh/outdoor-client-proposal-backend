@@ -78,7 +78,7 @@ function buildGeneratedPptFileName(proposal, client, now) {
   return `${clientNameSafe}-${dd}-${monthWords}-${yyyy}-${proposal.proposalId}.pptx`;
 }
 
-async function generateProposalPpt(proposal) {
+async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
   if (!proposal.client) {
     throw new Error('Selected client could not be found for this proposal');
   }
@@ -120,6 +120,11 @@ async function generateProposalPpt(proposal) {
   const client = proposal.client || {};
   const sites = proposal.sites || [];
   const now = new Date();
+  // "without" hides location text/title/map for every template below and, where the layout
+  // allows it, lets the site photo expand into the freed space; "with" (the default, for
+  // backward compatibility with any existing caller that doesn't pass locationMode) is the
+  // original, unchanged behavior.
+  const withLocation = locationMode !== 'without';
   const isAdinnNewTemplate = templateName === 'adinn-new-template';
   const isAdinnPhotosOnly = templateName === 'adinn-photos-only';
   const isJagranTemplateTwo = templateName === 'Jagran-template-two';
@@ -156,42 +161,63 @@ async function generateProposalPpt(proposal) {
     const siteDetailTpl = 'slide3';
     const staticLastSlide = slideFiles[slideFiles.length - 1];
 
+    // "Without Location": no title, no map/right box at all — the left photo box widens to fill
+    // the whole area (748675 to 17514869, i.e. Group 2's + Group 4's combined original span),
+    // applied once to the template slide before cloning so every per-site clone inherits it.
+    if (!withLocation) {
+      await tpl.resizeNamedGroup('ppt/slides/slide3.xml', 'Group 2', { newWidthEMU: 16766194 });
+    }
+
     const siteSlideBaseNames = [];
     for (const site of sites) {
       const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
       const locationText = site.location || site.areaName || site.mediaName || site.city || '';
-      const titleText = sizeLabel ? `${locationText} – ${sizeLabel}` : locationText;
+      const titleText = withLocation ? (sizeLabel ? `${locationText} – ${sizeLabel}` : locationText) : '';
       const siteImage = await getImageBuffer(site.mediaImage);
 
-      const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
       let mapImage = null;
-      if (hasCoords) {
-        const mapBuffer = await getRouteMapBuffer({
-          fromLat: client.latitude,
-          fromLng: client.longitude,
-          toLat: site.latitude,
-          toLng: site.longitude,
-        });
-        if (mapBuffer) mapImage = { buffer: mapBuffer, ext: 'png' };
+      if (withLocation) {
+        const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
+        if (hasCoords) {
+          const mapBuffer = await getRouteMapBuffer({
+            fromLat: client.latitude,
+            fromLng: client.longitude,
+            toLat: site.latitude,
+            toLng: site.longitude,
+          });
+          if (mapBuffer) mapImage = { buffer: mapBuffer, ext: 'png' };
+        }
       }
 
       const images = [];
-      if (siteImage) images.push({ relId: 'rId2', ...siteImage, boxWidthEMU: 10576310, boxHeightEMU: 7076491 });
+      if (siteImage) {
+        images.push({
+          relId: 'rId2',
+          ...siteImage,
+          boxWidthEMU: withLocation ? 10576310 : 16766194,
+          boxHeightEMU: 7076491,
+        });
+      }
       if (mapImage) images.push({ relId: 'rId3', ...mapImage, boxWidthEMU: 5775471, boxHeightEMU: 7076491 });
 
       const slideBase = await tpl.cloneAdinnSiteSlide(siteDetailTpl, {
         textReplacements: [['OMR Padur Nr. Hindustan College twds Solinganallur – 30x25', titleText]],
         images,
-        clearImageRelId: mapImage ? undefined : 'rId3',
-        placeholderText: mapImage
-          ? undefined
-          : {
-              offX: 11739398,
-              offY: 2105609,
-              extCx: 5775471,
-              extCy: 7076491,
-              text: 'Insert your map image here',
-            },
+        // "Without Location": Group 4 (the rId3 box) must be removed outright, not just left
+        // unfilled — it sits in document order after the now-widened Group 2, so leaving it in
+        // place would render its own reference-file image on top of the enlarged photo.
+        removeGroupNames: withLocation ? [] : ['Group 4'],
+        clearImageRelId: withLocation && !mapImage ? 'rId3' : undefined,
+        placeholderText:
+          withLocation && !mapImage
+            ? {
+                offX: 11739398,
+                offY: 2105609,
+                extCx: 5775471,
+                extCy: 7076491,
+                text: 'Insert your map image here',
+              }
+            : undefined,
       });
       siteSlideBaseNames.push(slideBase);
     }
@@ -248,7 +274,7 @@ async function generateProposalPpt(proposal) {
     const siteSlideBaseNames = [];
     for (const site of sites) {
       const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
-      const titleText = site.location || site.areaName || site.mediaName || site.city || '';
+      const titleText = withLocation ? site.location || site.areaName || site.mediaName || site.city || '' : '';
       const siteImage = await getImageBuffer(site.mediaImage);
       const siteInfo = site.siteInfoId && typeof site.siteInfoId === 'object' ? site.siteInfoId : null;
 
@@ -315,6 +341,11 @@ async function generateProposalPpt(proposal) {
     const slideFiles = await tpl.getSlideFiles();
     const remainingSlides = slideFiles.filter((f) => !['slide1', 'slide2', 'slide3', 'slide4', 'slide5'].includes(f));
 
+    // adinn-new-template has two distinct per-site slide roles: slide4 (photo + Media
+    // Specifications panel) and slide5 (photo + map). Rather than cloning both per site (the
+    // original behavior), locationMode now picks exactly one role per site: "with" → slide5
+    // (map), "without" → slide4 (specification panel) — the title always shows location+size
+    // on whichever slide is used, in both modes.
     const siteSlideBaseNames = [];
     for (const site of sites) {
       const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
@@ -322,23 +353,26 @@ async function generateProposalPpt(proposal) {
       const siteImage = await getImageBuffer(site.mediaImage);
       const titleReplacement = ['Periyanayakanpalayam bridge towards Mettupalayam 40x30', titleText];
 
-      // Slide 4 — site specification: title, bordered site-photo box, media spec values.
-      // Only the bordered foreground photo box (rId6) gets the site photo — the full-bleed
-      // background shape (rId2) stays exactly as in the reference file, since that's what
-      // renders as the plain white backdrop behind the Media Specifications panel.
-      const slide4Base = await tpl.cloneAdinnSiteSlide('slide4', {
-        textReplacements: [
-          titleReplacement,
-          ['Chennai', site.city || '-'],
-          ['40x30', sizeLabel || '-'],
-          ['Hoarding', site.mediaType || '-'],
-          ['Frontlit', site.illumination || '-'],
-          ['1', site.sizeUnit || '-'],
-        ],
-        images: siteImage ? [{ relId: 'rId6', ...siteImage, boxWidthEMU: 11366193, boxHeightEMU: 7736815 }] : [],
-        boxWidths: ADINN_MEDIA_SPEC_BOX_WIDTHS,
-      });
-      siteSlideBaseNames.push(slide4Base);
+      if (!withLocation) {
+        // Slide 4 — site specification: title, bordered site-photo box, media spec values.
+        // Only the bordered foreground photo box (rId6) gets the site photo — the full-bleed
+        // background shape (rId2) stays exactly as in the reference file, since that's what
+        // renders as the plain white backdrop behind the Media Specifications panel.
+        const slide4Base = await tpl.cloneAdinnSiteSlide('slide4', {
+          textReplacements: [
+            titleReplacement,
+            ['Chennai', site.city || '-'],
+            ['40x30', sizeLabel || '-'],
+            ['Hoarding', site.mediaType || '-'],
+            ['Frontlit', site.illumination || '-'],
+            ['1', site.sizeUnit || '-'],
+          ],
+          images: siteImage ? [{ relId: 'rId6', ...siteImage, boxWidthEMU: 11366193, boxHeightEMU: 7736815 }] : [],
+          boxWidths: ADINN_MEDIA_SPEC_BOX_WIDTHS,
+        });
+        siteSlideBaseNames.push(slide4Base);
+        continue;
+      }
 
       // Slide 5 — site + map: title, bordered site-photo box, map image cleared to a placeholder.
       // Same reasoning as slide 4: leave the full-bleed background (rId2) untouched.
@@ -401,10 +435,13 @@ async function generateProposalPpt(proposal) {
       for (const site of sitesByCity[city]) {
         const siteImage = await getImageBuffer(site.mediaImage);
         const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
-        const locationText = site.location || site.areaName || site.mediaName || site.city || '-';
+        // "Without Location" keeps only the size, dropping the location run entirely instead of
+        // leaving a blank run before it.
+        const locationText = withLocation ? site.location || site.areaName || site.mediaName || site.city || '-' : '';
+        const sizeText = withLocation ? (sizeLabel ? `  ${sizeLabel}` : '') : sizeLabel;
         const photoBase = await tpl.clonePhotoOnlySlide('slide2', {
           locationText,
-          sizeText: sizeLabel ? `  ${sizeLabel}` : '',
+          sizeText,
           image: siteImage,
           boxWidthEMU: 9448801,
           boxHeightEMU: 6096000,
@@ -480,7 +517,9 @@ async function generateProposalPpt(proposal) {
 
         for (const site of cities[city]) {
           const siteImage = await getImageBuffer(site.mediaImage);
-          const locationText = site.location || site.areaName || site.mediaName || '-';
+          // This template's caption is location-only (no size field at all), so "Without
+          // Location" simply leaves it blank — the photo is the only content on the slide.
+          const locationText = withLocation ? site.location || site.areaName || site.mediaName || '-' : '';
 
           const siteBase = await tpl.cloneCaptionPhotoSlide(siteDetailTpl, {
             captionText: locationText,
@@ -546,9 +585,15 @@ async function generateProposalPpt(proposal) {
 
       for (const site of sitesByCity[city]) {
         const siteImage = await getImageBuffer(site.mediaImage);
-        const locationText = site.location || site.areaName || site.mediaName || '-';
         const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
-        const captionText = sizeLabel ? `${locationText} -${sizeLabel}` : locationText;
+        // "Without Location" drops the location part, keeping only the size.
+        let captionText;
+        if (!withLocation) {
+          captionText = sizeLabel;
+        } else {
+          const locationText = site.location || site.areaName || site.mediaName || '-';
+          captionText = sizeLabel ? `${locationText} -${sizeLabel}` : locationText;
+        }
 
         const siteBase = await tpl.cloneCaptionPhotoSlide(siteDetailTpl, {
           captionText,
@@ -615,7 +660,9 @@ async function generateProposalPpt(proposal) {
 
       for (const site of sitesByCity[city]) {
         const siteImage = await getImageBuffer(site.mediaImage);
-        const locationText = site.location || site.areaName || site.mediaName || '-';
+        // "Without Location" blanks only the free-text location title — City/State/Media
+        // type/Illumination/Size in the Media Specifications panel below it stay unchanged.
+        const locationText = withLocation ? site.location || site.areaName || site.mediaName || '-' : '';
         const widthText = site.width != null ? Number(site.width).toFixed(2) : '-';
         const heightText = site.height != null ? Number(site.height).toFixed(2) : '-';
 
