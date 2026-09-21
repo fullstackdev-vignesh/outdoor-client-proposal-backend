@@ -30,6 +30,12 @@ const ADINN_EXCEL_1 = {
   // the client has that percentage set — see applyAdinnDynamicColumns in excelTemplateEngine.js.
   removeColumns: ['O', 'P'],
   feeColumnsBeforeAnchor: 'M',
+  // Area/Display/Printing/Mounting (style 11) and Total Cost (style 14) ship in "General"
+  // format (plain "250000", no grouping) — reformatted to Indian comma grouping
+  // ("2,50,000"). 22/23 are the same columns' styles in the moved Total row (the border-row
+  // style), and 14/22 are what applyAdinnDynamicColumns reuses for the Agency Comm/GST cells
+  // it inserts, so this list also covers those automatically.
+  indianCommaStyleIds: [11, 14, 22, 23],
 };
 
 // ROTN — real uploaded proposal file used as master. Header row1, one blank spacer row2,

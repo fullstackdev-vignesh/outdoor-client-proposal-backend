@@ -42,6 +42,72 @@ function setCellFormula(xml, cellRef, formula) {
   return xml;
 }
 
+// Finds (or adds) a custom numFmt entry for the given Excel format code — custom format ids
+// must be >=164 per the OOXML spec (0-163 are reserved built-ins). Returns the id to use.
+function ensureNumFmt(stylesXml, formatCode) {
+  const existing = stylesXml.match(new RegExp(`<numFmt numFmtId="(\\d+)" formatCode="${formatCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
+  if (existing) return { stylesXml, numFmtId: Number(existing[1]) };
+
+  const usedIds = [...stylesXml.matchAll(/<numFmt numFmtId="(\d+)"/g)].map((m) => Number(m[1]));
+  const numFmtId = Math.max(163, ...usedIds) + 1;
+  const entry = `<numFmt numFmtId="${numFmtId}" formatCode="${formatCode}"/>`;
+
+  if (stylesXml.includes('<numFmts')) {
+    stylesXml = stylesXml
+      .replace(/<numFmts count="(\d+)">/, (m, count) => `<numFmts count="${Number(count) + 1}">`)
+      .replace('</numFmts>', `${entry}</numFmts>`);
+  } else {
+    stylesXml = stylesXml.replace(/(<styleSheet[^>]*>)/, `$1<numFmts count="1">${entry}</numFmts>`);
+  }
+  return { stylesXml, numFmtId };
+}
+
+// Clones cellXfs[oldIndex] (same font/fill/border/alignment) with its numFmtId swapped to
+// `numFmtId` and appends it as a new style — the original style (and every other cell using
+// it) is left completely untouched.
+function cloneStyleWithNumFmt(stylesXml, oldIndex, numFmtId) {
+  const m = stylesXml.match(/<cellXfs count="(\d+)">([\s\S]*?)<\/cellXfs>/);
+  const count = Number(m[1]);
+  const xfs = [...m[2].matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)].map((x) => x[0]);
+  const old = xfs[oldIndex];
+  if (!old) return { stylesXml, newIndex: oldIndex };
+
+  let newXf = old.includes('numFmtId="')
+    ? old.replace(/numFmtId="\d+"/, `numFmtId="${numFmtId}"`)
+    : old.replace('<xf ', `<xf numFmtId="${numFmtId}" `);
+  if (!newXf.includes('applyNumberFormat=')) {
+    newXf = newXf.replace('<xf ', '<xf applyNumberFormat="1" ');
+  } else {
+    newXf = newXf.replace(/applyNumberFormat="0"/, 'applyNumberFormat="1"');
+  }
+
+  const newIndex = count;
+  stylesXml = stylesXml
+    .replace(/<cellXfs count="(\d+)">/, `<cellXfs count="${count + 1}">`)
+    .replace('</cellXfs>', `${newXf}</cellXfs>`);
+  return { stylesXml, newIndex };
+}
+
+// Reformats every cell currently using one of `styleIds` to a cloned version of that same
+// style with Indian comma-grouped digits (e.g. 1000000 -> displayed as 10,00,000) — matched
+// by STYLE ID rather than column letter, so it still finds the right cells even after
+// removeColumns/insertColumnBefore have shifted which letter a cost column actually lives at.
+function applyIndianNumberFormat(sheetXml, stylesXml, styleIds) {
+  const { stylesXml: withFmt, numFmtId } = ensureNumFmt(stylesXml, '#,##,##0');
+  stylesXml = withFmt;
+  const styleMap = {};
+  for (const oldId of styleIds) {
+    if (!sheetXml.includes(`s="${oldId}"`)) continue;
+    const { stylesXml: cloned, newIndex } = cloneStyleWithNumFmt(stylesXml, oldId, numFmtId);
+    stylesXml = cloned;
+    styleMap[oldId] = newIndex;
+  }
+  for (const [oldId, newId] of Object.entries(styleMap)) {
+    sheetXml = sheetXml.split(`s="${oldId}"`).join(`s="${newId}"`);
+  }
+  return { sheetXml, stylesXml };
+}
+
 function colToNum(col) {
   let n = 0;
   for (let i = 0; i < col.length; i++) n = n * 26 + (col.charCodeAt(i) - 64);
@@ -479,6 +545,21 @@ async function generateExcelFromTemplate(rows, { buffer, config, client } = {}) 
     }
   } else if (cfg.removeColumns?.length) {
     sheetXml = removeColumns(sheetXml, cfg.removeColumns);
+  }
+
+  // Indian comma-grouped display (e.g. 1000000 -> "10,00,000") for whichever style ids the
+  // config says hold cost/area values — matched by style id (not column letter) so it still
+  // finds the right cells even after removeColumns/insertColumnBefore shifted them, and
+  // automatically covers the dynamically-inserted Agency Comm/GST cells too since those reuse
+  // Total Cost's own style ids.
+  if (cfg.indianCommaStyleIds?.length) {
+    const stylesPath = 'xl/styles.xml';
+    if (zip.file(stylesPath)) {
+      let stylesXml = await zip.file(stylesPath).async('string');
+      const result = applyIndianNumberFormat(sheetXml, stylesXml, cfg.indianCommaStyleIds);
+      sheetXml = result.sheetXml;
+      zip.file(stylesPath, result.stylesXml);
+    }
   }
 
   if (zip.file('xl/workbook.xml')) {
