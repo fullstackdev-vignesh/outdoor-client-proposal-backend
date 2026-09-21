@@ -258,12 +258,18 @@ function addMergeCell(sheetXml, ref) {
     .replace('</mergeCells>', `<mergeCell ref="${ref}"/></mergeCells>`);
 }
 
-// Adinn-only: Vendor Name/Vendor Cost are unconditionally dropped from the sheet, and an
-// Agency Comm / GST column is inserted immediately before Total Cost — but ONLY when the
-// client has that percentage set — in that order, so Total Cost ends up right after whichever
-// of them are present (matching the Jagran format's own Agency Comm -> GST -> Total column
-// order and calculation: each fee = (running subtotal so far) * percent / 100, and Total Cost
-// becomes the sum of Display+Printing+Mounting plus whichever fees got inserted).
+// Adinn (and, via config, ROTN): Vendor Name/Vendor Cost are unconditionally dropped from the
+// sheet, and an Agency Comm / GST column is inserted immediately before the Total Cost anchor —
+// but ONLY when the client has that percentage set — in that order, so Total Cost ends up right
+// after whichever of them are present (matching the Jagran format's own Agency Comm -> GST ->
+// Total column order and calculation: each fee = (running subtotal so far) * percent / 100, and
+// Total Cost becomes the sum of the base cost columns plus whichever fees got inserted).
+//
+// `cfg.feeRangeStartCol` (default 'J', Adinn's Display Cost column) and `cfg.feeRangeBaseEndCol`
+// (default 'L', Adinn's Mounting Cost column) describe the fixed base cost range each fee's
+// running percentage is computed over before any fees are inserted. `cfg.feeStyleIds` (default
+// Adinn's own {header:25, data:14, total:22}) lets a different uploaded file's own style ids be
+// reused for the newly inserted cells so they visually match that file's existing columns.
 function applyAdinnDynamicColumns(sheetXml, cfg, client, firstDataRow, lastUsedRow, totalRow) {
   if (cfg.removeColumns?.length) sheetXml = removeColumns(sheetXml, cfg.removeColumns);
   if (!cfg.feeColumnsBeforeAnchor) return sheetXml;
@@ -272,6 +278,10 @@ function applyAdinnDynamicColumns(sheetXml, cfg, client, firstDataRow, lastUsedR
   if (client?.agencyComm) fees.push({ key: 'agencyComm', label: 'Agency Comm', percent: Number(client.agencyComm) });
   if (client?.gst) fees.push({ key: 'gst', label: 'GST', percent: Number(client.gst) });
   if (!fees.length) return sheetXml;
+
+  const rangeStartCol = cfg.feeRangeStartCol || 'J';
+  const baseEndCol = cfg.feeRangeBaseEndCol || 'L';
+  const styleIds = { header: 25, data: 14, total: 22, ...(cfg.feeStyleIds || {}) };
 
   let totalCol = cfg.feeColumnsBeforeAnchor;
   const inserted = [];
@@ -284,36 +294,105 @@ function applyAdinnDynamicColumns(sheetXml, cfg, client, firstDataRow, lastUsedR
   // Header (row 1 label + merged row 2 blank cell) for each inserted fee column.
   for (const fee of inserted) {
     const headerText = `${fee.label} ${fee.percent}%`;
-    sheetXml = insertCellInRow(sheetXml, 1, `${fee.col}1`, `<c r="${fee.col}1" s="25" t="inlineStr"><is><t>${xmlEscape(headerText)}</t></is></c>`);
-    sheetXml = insertCellInRow(sheetXml, 2, `${fee.col}2`, `<c r="${fee.col}2" s="25"/>`);
+    sheetXml = insertCellInRow(sheetXml, 1, `${fee.col}1`, `<c r="${fee.col}1" s="${styleIds.header}" t="inlineStr"><is><t>${xmlEscape(headerText)}</t></is></c>`);
+    sheetXml = insertCellInRow(sheetXml, 2, `${fee.col}2`, `<c r="${fee.col}2" s="${styleIds.header}"/>`);
     sheetXml = addMergeCell(sheetXml, `${fee.col}1:${fee.col}2`);
   }
 
-  // Each fee is a running percentage of the subtotal built up so far (Display+Printing+
-  // Mounting, then each previously-inserted fee) — same compounding rule Jagran already uses
-  // for its own Agency Comm -> GST columns. Total Cost is rewritten to sum everything up to
-  // (but not including) itself.
+  // Each fee is a running percentage of the subtotal built up so far (the base cost columns,
+  // then each previously-inserted fee) — same compounding rule Jagran already uses for its own
+  // Agency Comm -> GST columns. Total Cost is rewritten to sum everything up to (but not
+  // including) itself.
   for (let r = firstDataRow; r <= lastUsedRow; r++) {
-    let rangeEnd = 'L';
+    let rangeEnd = baseEndCol;
     for (const fee of inserted) {
-      sheetXml = insertCellInRow(sheetXml, r, `${fee.col}${r}`, `<c r="${fee.col}${r}" s="14"/>`);
-      sheetXml = setCellFormula(sheetXml, `${fee.col}${r}`, `ROUND(SUM(J${r}:${rangeEnd}${r})*${fee.percent}/100,2)`);
+      sheetXml = insertCellInRow(sheetXml, r, `${fee.col}${r}`, `<c r="${fee.col}${r}" s="${styleIds.data}"/>`);
+      sheetXml = setCellFormula(sheetXml, `${fee.col}${r}`, `ROUND(SUM(${rangeStartCol}${r}:${rangeEnd}${r})*${fee.percent}/100,2)`);
       rangeEnd = fee.col;
     }
-    sheetXml = setCellFormula(sheetXml, `${totalCol}${r}`, `SUM(J${r}:${rangeEnd}${r})`);
+    sheetXml = setCellFormula(sheetXml, `${totalCol}${r}`, `SUM(${rangeStartCol}${r}:${rangeEnd}${r})`);
   }
 
   // Total row: each inserted fee column gets its own SUM-down-the-column cell (didn't exist
   // before the column was inserted). The pre-existing Total Cost total-row cell moved to
   // `totalCol` via insertColumnBefore's generic shift, but its FORMULA TEXT still literally
-  // says "SUM(M...)" (only cell addresses get renamed by the shift, never formula text) —
-  // since M now holds a fee column's value instead, that stale text must be rewritten to sum
-  // whatever column Total Cost actually ended up in.
+  // says the old anchor's stale range (only cell addresses get renamed by the shift, never
+  // formula text) — since that old anchor letter now holds a fee column's value instead, that
+  // stale text must be rewritten to sum whatever column Total Cost actually ended up in.
   for (const fee of inserted) {
-    sheetXml = insertCellInRow(sheetXml, totalRow, `${fee.col}${totalRow}`, `<c r="${fee.col}${totalRow}" s="22"/>`);
+    sheetXml = insertCellInRow(sheetXml, totalRow, `${fee.col}${totalRow}`, `<c r="${fee.col}${totalRow}" s="${styleIds.total}"/>`);
     sheetXml = setCellFormula(sheetXml, `${fee.col}${totalRow}`, `SUM(${fee.col}${firstDataRow}:${fee.col}${lastUsedRow})`);
   }
   sheetXml = setCellFormula(sheetXml, `${totalCol}${totalRow}`, `SUM(${totalCol}${firstDataRow}:${totalCol}${lastUsedRow})`);
+
+  return sheetXml;
+}
+
+// Jagran-only: unlike Adinn/ROTN, the uploaded master file already has native Agency Comm/GST
+// columns baked in with a FIXED percentage in both the header label and every row's formula
+// (e.g. "Agency comm. @ 2%", always computed regardless of who the client is). This makes them
+// conditional on the actual proposal's client, matching Adinn's rule: a fee column is removed
+// entirely when the client doesn't have that percentage set, and rewritten (header label +
+// every row's formula, using the CLIENT'S real percentage instead of the file's fixed one) when
+// they do. `cfg.conditionalFeeColumns` lists each fee in file column order (e.g. Agency Comm
+// before GST); `cfg.conditionalFeeBaseColumns` are the always-present cost columns the running
+// SUM starts from; `cfg.conditionalFeeTotalCol` is the final Total column after them.
+function applyConditionalFeeColumns(sheetXml, cfg, client, firstDataRow, lastUsedRow, totalRow) {
+  const feeDefs = cfg.conditionalFeeColumns;
+  if (!feeDefs?.length) return sheetXml;
+
+  const present = feeDefs.filter((f) => client?.[f.key]);
+  const absent = feeDefs.filter((f) => !present.includes(f));
+
+  if (absent.length) sheetXml = removeColumns(sheetXml, absent.map((f) => f.col));
+
+  // Recompute each surviving column's final letter after removal — the original file's
+  // base-cost / fee / total columns are always consecutive, so removing an absent one shifts
+  // every letter after it one to the left.
+  const orderedOriginal = [...cfg.conditionalFeeBaseColumns, ...feeDefs.map((f) => f.col), cfg.conditionalFeeTotalCol];
+  const survivors = orderedOriginal.filter((letter) => !absent.some((f) => f.col === letter));
+  const startNum = colToNum(cfg.conditionalFeeBaseColumns[0]);
+  const letterMap = {};
+  survivors.forEach((orig, i) => {
+    letterMap[orig] = numToCol(startNum + i);
+  });
+
+  const baseStartCol = letterMap[cfg.conditionalFeeBaseColumns[0]];
+  const baseEndCol = letterMap[cfg.conditionalFeeBaseColumns[cfg.conditionalFeeBaseColumns.length - 1]];
+  const newTotalCol = letterMap[cfg.conditionalFeeTotalCol];
+
+  // Header label — same cell the file's own fixed-percentage text already occupies, now
+  // rewritten with the client's real percentage.
+  for (const fee of present) {
+    const col = letterMap[fee.col];
+    const pct = Number(client[fee.key]);
+    sheetXml = setCell(sheetXml, `${col}2`, `${fee.label} @ ${pct}%`, { text: true });
+  }
+
+  // Every data row's own fee/Total formulas — present fees keep the file's own compounding
+  // rule (running % of the subtotal so far), just with the client's real percentage and the
+  // post-removal column letters; Total always sums the base columns through whichever fee
+  // column (if any) ends up last.
+  for (let r = firstDataRow; r <= lastUsedRow; r++) {
+    let rangeEnd = baseEndCol;
+    for (const fee of present) {
+      const col = letterMap[fee.col];
+      const pct = Number(client[fee.key]);
+      sheetXml = setCellFormula(sheetXml, `${col}${r}`, `SUM(${baseStartCol}${r}:${rangeEnd}${r})*${pct}%`);
+      rangeEnd = col;
+    }
+    sheetXml = setCellFormula(sheetXml, `${newTotalCol}${r}`, `SUM(${baseStartCol}${r}:${rangeEnd}${r})`);
+  }
+
+  // Total row (already moved/renumbered to `totalRow` by the generic pipeline before this runs)
+  // — same stale-formula-text problem as Adinn's own dynamic columns: whichever fee columns
+  // survive need a fresh SUM-down-the-column formula, and Total's own total-row cell (whatever
+  // letter it ended up at) needs its range rewritten to match.
+  for (const fee of present) {
+    const col = letterMap[fee.col];
+    sheetXml = setCellFormula(sheetXml, `${col}${totalRow}`, `SUM(${col}${firstDataRow}:${col}${lastUsedRow})`);
+  }
+  sheetXml = setCellFormula(sheetXml, `${newTotalCol}${totalRow}`, `SUM(${newTotalCol}${firstDataRow}:${newTotalCol}${lastUsedRow})`);
 
   return sheetXml;
 }
@@ -495,6 +574,20 @@ async function generateExcelFromTemplate(rows, { buffer, config, client } = {}) 
 
   sheetXml = cfg.mode === 'block-per-site' ? fillBlockPerSite(sheetXml, usable, cfg) : fillRowPerSite(sheetXml, usable, cfg);
 
+  // fillRowPerSite/fillBlockPerSite skip any field whose value is '' (so leaving a field out of
+  // buildExcelRow's output, or a site simply not having that data, doesn't blank out cells other
+  // templates might rely on keeping their own static example text) — but a blank `rationale`
+  // (site has no SiteInfo linked) must actually CLEAR the cell instead, or a jagran-excel-2 row
+  // whose site was swapped in would keep showing whatever unrelated Rationale text the master
+  // file's own original example proposal had for that row number.
+  if (cfg.columns.rationale) {
+    const effectiveBlockSize = cfg.mode === 'block-per-site' ? blockSize : 1;
+    usable.forEach((row, i) => {
+      const r = cfg.firstDataRow + i * effectiveBlockSize;
+      sheetXml = setCell(sheetXml, `${cfg.columns.rationale}${r}`, row.rationale || '', { text: true });
+    });
+  }
+
   // Cosmetic header-cell overrides — e.g. the uploaded template's own header says "Media
   // Vehicle", shown as "Media Type" instead, without touching the original uploaded file.
   for (const { cell, text } of cfg.headerRenames || []) {
@@ -542,6 +635,9 @@ async function generateExcelFromTemplate(rows, { buffer, config, client } = {}) 
 
     if (cfg.removeColumns?.length || cfg.feeColumnsBeforeAnchor) {
       sheetXml = applyAdinnDynamicColumns(sheetXml, cfg, client, cfg.firstDataRow, lastUsedRow, newTotalRowNum);
+    }
+    if (cfg.conditionalFeeColumns?.length) {
+      sheetXml = applyConditionalFeeColumns(sheetXml, cfg, client, cfg.firstDataRow, lastUsedRow, newTotalRowNum);
     }
   } else if (cfg.removeColumns?.length) {
     sheetXml = removeColumns(sheetXml, cfg.removeColumns);

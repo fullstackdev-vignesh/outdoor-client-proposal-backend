@@ -1100,6 +1100,9 @@ function buildExcelRow(site, index) {
     printingCost: site.printingCost || 0,
     mountingCost: site.mountingCost || 0,
     siteStatus: site.mediaStatus ? site.mediaStatus.charAt(0).toUpperCase() + site.mediaStatus.slice(1) : '',
+    // Site Information master data's description (jagran-excel-2's "Rationale" column) — blank
+    // when the site has no siteInfoId linked, rather than showing a template's own leftover text.
+    rationale: (site.siteInfoId && typeof site.siteInfoId === 'object' && site.siteInfoId.description) || '',
   };
 }
 

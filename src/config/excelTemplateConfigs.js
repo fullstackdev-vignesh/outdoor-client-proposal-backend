@@ -72,6 +72,18 @@ const ROTN_EXCEL_1 = {
     { column: 'N', build: (r, cols) => `${cols.displayCostPerMonth}${r}/30*${cols.durationDays}${r}` },
   ],
   totalColumns: ['J', 'K', 'M', 'N', 'O', 'P', 'Q'],
+  // The real uploaded ROTN file has NO Agency Comm/GST columns at all — unlike Adinn (whose
+  // Vendor columns get replaced) or Jagran (whose fee columns already exist, fixed-percentage),
+  // ROTN's Total Cost (Q) is simply Display Duration Cost + Printing + Mounting (N+O+P). Reuses
+  // the exact same "insert only when the client has that percentage set" mechanism Adinn uses
+  // (applyAdinnDynamicColumns in excelTemplateEngine.js) — feeRangeStartCol/feeRangeBaseEndCol
+  // describe ROTN's own base cost range (N:P, not Adinn's J:L), and feeStyleIds reuse ROTN's own
+  // neighboring header/data/total-row style ids so inserted cells match this file's look instead
+  // of Adinn's.
+  feeColumnsBeforeAnchor: 'Q',
+  feeRangeStartCol: 'N',
+  feeRangeBaseEndCol: 'P',
+  feeStyleIds: { header: 11, data: 25, total: 17 },
 };
 
 // Jagran — both real uploaded proposal files share the exact same column layout (header
@@ -111,6 +123,19 @@ const JAGRAN_EXCEL_1 = {
     { col: 'L', width: 22 },
     { col: 'N', width: 20 },
   ],
+  // Unlike Adinn/ROTN, the real uploaded file already has these two fee columns natively baked
+  // in (Q: "Agency comm. @ 2%", R: "GST @ 18%", S: "Total (Incl. All)") — always shown, always
+  // computed with that FIXED percentage regardless of who the client actually is. This makes
+  // them conditional (removed when the client has no such percentage set, rewritten with the
+  // client's real percentage — both the header label and every row's formula — when they do),
+  // matching Adinn's own conditional rule, via applyConditionalFeeColumns in
+  // excelTemplateEngine.js. Order matters: Agency Comm before GST, same as the file's own layout.
+  conditionalFeeColumns: [
+    { key: 'agencyComm', col: 'Q', label: 'Agency comm.' },
+    { key: 'gst', col: 'R', label: 'GST' },
+  ],
+  conditionalFeeBaseColumns: ['N', 'O', 'P'],
+  conditionalFeeTotalCol: 'S',
 };
 
 const JAGRAN_EXCEL_2 = {
@@ -118,9 +143,11 @@ const JAGRAN_EXCEL_2 = {
   lastDataRow: 9,
   totalRow: 11,
   // Format 2's sheet has two extra columns format 1 doesn't (T Availability, U Rationale) —
-  // Availability had no Site field mapped to it, so it just showed blank; map it to the
-  // site's current status (Available/Booked/Blocked). Rationale (U) is left untouched.
-  columns: { ...JAGRAN_COLUMNS, siteStatus: 'T' },
+  // Availability maps to the site's current status (Available/Booked/Blocked). Rationale maps
+  // to the site's linked SiteInfo master data's description (blank when none linked) — cleared
+  // via the rationale-specific fillRowPerSite fix-up in excelTemplateEngine.js rather than left
+  // showing the master file's own unrelated leftover example text for that row.
+  columns: { ...JAGRAN_COLUMNS, siteStatus: 'T', rationale: 'U' },
 };
 
 const EXCEL_CONFIGS = {
