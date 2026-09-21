@@ -572,6 +572,37 @@ class PptxTemplate {
     this.writeText(slidePath, slideXml);
   }
 
+  // Draws a plain solid-white rectangle on a cloned slide, used to blank out label/border
+  // graphics that are baked into the slide LAYOUT (not the slide itself), so removing the
+  // slide's own value shapes still leaves the layout's static "State:"/"City:" boxes visible
+  // behind them. Inserted before any real content that should sit on top of the cover.
+  async insertWhiteCover(slidePath, { offX, offY, extCx, extCy }) {
+    let slideXml = await this.readText(slidePath);
+    const rect =
+      `<p:sp><p:nvSpPr><p:cNvPr name="Location Mode Cover" id="${9600 + this._nextSlideIndex}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>` +
+      `<p:spPr><a:xfrm><a:off x="${offX}" y="${offY}"/><a:ext cx="${extCx}" cy="${extCy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+      `<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln><a:noFill/></a:ln></p:spPr>` +
+      `<p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>`;
+    slideXml = slideXml.replace('</p:spTree>', `${rect}</p:spTree>`);
+    this.writeText(slidePath, slideXml);
+  }
+
+  // Standalone, post-clone version of cloneAdinnSiteSlide's removeShapesAtOffset — drops plain
+  // <p:sp> shapes matched by their exact <a:off y>/<a:ext cy>, on an already-cloned slide part.
+  // Used where a slide's per-site clone method (e.g. cloneSlide) has no removeShapesAtOffset
+  // option of its own, so shapes are stripped in a separate pass after cloning instead.
+  async removeShapesAtOffsets(slidePath, offsets = []) {
+    let slideXml = await this.readText(slidePath);
+    for (const { offY, extCy } of offsets) {
+      const shapeRe = /<p:sp>(?:(?!<\/p:sp>)[\s\S])*?<\/p:sp>/g;
+      const marker = `y="${offY}"/><a:ext cx="`;
+      slideXml = slideXml.replace(shapeRe, (block) =>
+        block.includes(marker) && block.includes(`cy="${extCy}"/>`) ? '' : block
+      );
+    }
+    this.writeText(slidePath, slideXml);
+  }
+
   // Inserts a brand-new <p:pic> (a real image, e.g. a fetched route map) or, with no buffer, the
   // same "Insert your map image here" placeholder text used elsewhere, at an arbitrary position.
   // Used by templates whose reference design never had a second/map box at all, so one has to be

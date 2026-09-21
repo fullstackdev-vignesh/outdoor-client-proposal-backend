@@ -847,15 +847,18 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
 
       for (const site of sitesByCity[city]) {
         const siteImage = await getImageBuffer(site.mediaImage);
-        // No separate map element in this template — the title is unaffected by locationMode,
-        // same as the Media Specifications panel below it (City/State/Media type/Illumination/Size).
         const locationText = site.location || site.areaName || site.mediaName || '-';
         const widthText = site.width != null ? Number(site.width).toFixed(2) : '-';
         const heightText = site.height != null ? Number(site.height).toFixed(2) : '-';
+        const sizeLabel = site.width && site.height ? `${widthText}x${heightText}` : '';
+        // "With Location" matches adinn-new-template's title convention (location+size combined);
+        // "Without Location" keeps location only, since Width/Height already show separately in
+        // the visible Media Specifications panel there.
+        const titleText = withLocation && sizeLabel ? `${locationText} ${sizeLabel}` : locationText;
 
         const siteBase = await tpl.cloneSlide(siteDetailTpl, {
           textReplacements: [
-            ['Porur EB Office towards Porur Signal', locationText],
+            ['Porur EB Office towards Porur Signal', titleText],
             ['Tamil Nadu', site.state || '-'],
             ['Chennai', site.city || '-'],
             ['Hoarding', site.mediaType || '-'],
@@ -865,6 +868,62 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
           ],
           imageReplacements: siteImage ? [siteImage] : [],
         });
+
+        if (withLocation) {
+          // This template's reference design never had a map box — the site photo already sits
+          // in the slide's left ~60% (534554 to 10512177 of a 17279938-wide slide), leaving the
+          // Media Specifications panel in the right column. That panel's "State:"/"City:"/etc
+          // labels and borders are baked into the slide LAYOUT itself (slideLayout1.xml), not
+          // the slide — so removing the slide's own value shapes alone still leaves the empty
+          // labelled boxes visible underneath. "With Location" therefore also draws a plain
+          // white cover over that whole panel area (everything below the title box, which stays
+          // visible), then fills the freed space with a real route map (or the usual
+          // placeholder), instead of narrowing the photo like the other single-photo templates.
+          await tpl.removeShapesAtOffsets(`ppt/slides/${siteBase}.xml`, [
+            { offY: 3220502, extCy: 687600 }, // State
+            { offY: 4152859, extCy: 650216 }, // City
+            { offY: 5001571, extCy: 685800 }, // Media type
+            { offY: 5022156, extCy: 617621 }, // Illumination
+            { offY: 5869827, extCy: 678927 }, // Width
+            { offY: 5880511, extCy: 638897 }, // Height
+            { offY: 6817052, extCy: 638897 }, // Duration
+          ]);
+
+          // Title box (offY 1299456, cy 1609098) ends at y=2908554 — the cover starts right
+          // below it so the title stays visible, and spans to near the slide's right/bottom edges.
+          await tpl.insertWhiteCover(`ppt/slides/${siteBase}.xml`, {
+            offX: 10897898,
+            offY: 2908554,
+            extCx: 6182040,
+            extCy: 5532209,
+          });
+
+          let mapImage = null;
+          const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
+          if (hasCoords) {
+            const mapBuffer = await getRouteMapBuffer({
+              fromLat: client.latitude,
+              fromLng: client.longitude,
+              toLat: site.latitude,
+              toLng: site.longitude,
+            });
+            if (mapBuffer) mapImage = { buffer: mapBuffer, ext: 'png' };
+          }
+
+          await tpl.insertImageOrPlaceholder(
+            `ppt/slides/${siteBase}.xml`,
+            `ppt/slides/_rels/${siteBase}.xml.rels`,
+            {
+              offX: 10997898,
+              offY: 3008554,
+              extCx: 5982040,
+              extCy: 5332209,
+              buffer: mapImage?.buffer,
+              ext: mapImage?.ext,
+            }
+          );
+        }
+
         insertedBaseNames.push(siteBase);
       }
     }
