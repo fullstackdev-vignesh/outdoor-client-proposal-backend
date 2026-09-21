@@ -172,7 +172,9 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     for (const site of sites) {
       const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
       const locationText = site.location || site.areaName || site.mediaName || site.city || '';
-      const titleText = withLocation ? (sizeLabel ? `${locationText} – ${sizeLabel}` : locationText) : '';
+      // Title always shows location+size in both modes — matching adinn-new-template, only the
+      // map (present here, replaced by a widened photo below) changes with locationMode.
+      const titleText = sizeLabel ? `${locationText} – ${sizeLabel}` : locationText;
       const siteImage = await getImageBuffer(site.mediaImage);
 
       let mapImage = null;
@@ -205,8 +207,11 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
         images,
         // "Without Location": Group 4 (the rId3 box) must be removed outright, not just left
         // unfilled — it sits in document order after the now-widened Group 2, so leaving it in
-        // place would render its own reference-file image on top of the enlarged photo.
-        removeGroupNames: withLocation ? [] : ['Group 4'],
+        // place would render its own reference-file image on top of the enlarged photo. Group 18
+        // and Group 22 are the two decorative map-pin icons positioned inside the map box's area
+        // (x=13736435/14567387) — once the photo widens to cover that same area they'd float on
+        // top of the site photo, so they're removed alongside Group 4 in this mode.
+        removeGroupNames: withLocation ? [] : ['Group 4', 'Group 18', 'Group 22'],
         clearImageRelId: withLocation && !mapImage ? 'rId3' : undefined,
         placeholderText:
           withLocation && !mapImage
@@ -271,10 +276,32 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
       (b) => ![7020816, 8414641, 8408521].includes(b.offY)
     );
 
+    // This template's reference design never had a map box at all — "With Location" adds one
+    // by narrowing the photo group (Group 20) and inserting a real route map (or the usual
+    // "Insert your map image here" placeholder) beside it, same idea as adinn-photos-only. Since
+    // the whole Media Specifications side of the slide is now hidden in this mode, the map box
+    // widens to use that freed space too, so the two boxes span edge-to-edge like
+    // adinn-new-template's own site+map slide (slide width 18288000, small right margin only).
+    // Photo box width, map box position/width match adinn-new-template's own slide5 (site+map)
+    // values exactly, per the user's explicit request — only PHOTO_BOX_OFF_Y/PHOTO_BOX_HEIGHT
+    // stay Direct-Client-format's own (that template's vertical geometry differs slightly).
+    const PHOTO_BOX_OFF_Y = 1469733;
+    const PHOTO_BOX_HEIGHT = 7736815;
+    const PHOTO_BOX_LEFT_WIDTH = 10484172;
+    const PHOTO_BOX_RIGHT_X = 11605227;
+    const PHOTO_BOX_RIGHT_WIDTH = 6508010;
+    if (withLocation) {
+      await tpl.resizeNamedGroup('ppt/slides/slide4.xml', 'Group 20', { newWidthEMU: PHOTO_BOX_LEFT_WIDTH });
+    }
+
     const siteSlideBaseNames = [];
     for (const site of sites) {
       const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
-      const titleText = withLocation ? site.location || site.areaName || site.mediaName || site.city || '' : '';
+      // "With Location" matches adinn-new-template's own title convention exactly
+      // (location + size together); "Without Location" keeps location only, since Size is
+      // already shown separately in the Media Specifications panel that stays visible there.
+      const locationText = site.location || site.areaName || site.mediaName || site.city || '';
+      const titleText = withLocation ? `${locationText} ${sizeLabel}`.trim() : locationText;
       const siteImage = await getImageBuffer(site.mediaImage);
       const siteInfo = site.siteInfoId && typeof site.siteInfoId === 'object' ? site.siteInfoId : null;
 
@@ -293,11 +320,54 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
 
       const slide4Base = await tpl.cloneAdinnSiteSlide('slide4', {
         textReplacements,
-        images: siteImage ? [{ relId: 'rId6', ...siteImage, boxWidthEMU: 11366193, boxHeightEMU: 7736815 }] : [],
-        boxWidths: DIRECT_CLIENT_BOX_WIDTHS,
-        removeGroupNames: siteInfo?.description ? [] : ['Group 29'],
-        removeShapesAtOffset: siteInfo?.description ? [] : [{ offY: 7117158, extCy: 1416150 }],
+        images: siteImage
+          ? [{ relId: 'rId6', ...siteImage, boxWidthEMU: withLocation ? PHOTO_BOX_LEFT_WIDTH : 11366193, boxHeightEMU: PHOTO_BOX_HEIGHT }]
+          : [],
+        boxWidths: withLocation ? [] : DIRECT_CLIENT_BOX_WIDTHS,
+        // "With Location" removes the Site Info card outright (not just when the site has none),
+        // since the whole Media Specifications side of the slide is hidden in that mode.
+        removeGroupNames: withLocation || !siteInfo?.description ? ['Group 29'] : [],
+        // TextBox 18 ("Who we are") is a leftover decorative fragment normally hidden entirely
+        // behind the full-width photo — shrinking the photo for "With Location" exposes it,
+        // overlapping the new map box, so it's removed only in that split layout. In that same
+        // mode the whole Media Specifications panel (heading + City/Size/Media type label+value
+        // pairs, each pair sharing one offY/cy) is removed too, leaving only image+map+title.
+        removeShapesAtOffset: [
+          ...(withLocation || !siteInfo?.description ? [{ offY: 7117158, extCy: 1416150 }] : []),
+          ...(withLocation
+            ? [
+                { offY: 2436416, extCy: 558271 }, // "Who we are"
+                { offY: 1611727, extCy: 581025 }, // "Media Specifications" heading
+                { offY: 2842286, extCy: 469900 }, // City label + value
+                { offY: 4233166, extCy: 469900 }, // Size label + value
+                { offY: 5626991, extCy: 469900 }, // Media type label + value
+              ]
+            : []),
+        ],
       });
+
+      if (withLocation) {
+        let mapImage = null;
+        const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
+        if (hasCoords) {
+          const mapBuffer = await getRouteMapBuffer({
+            fromLat: client.latitude,
+            fromLng: client.longitude,
+            toLat: site.latitude,
+            toLng: site.longitude,
+          });
+          if (mapBuffer) mapImage = { buffer: mapBuffer, ext: 'png' };
+        }
+        await tpl.insertImageOrPlaceholder(`ppt/slides/${slide4Base}.xml`, `ppt/slides/_rels/${slide4Base}.xml.rels`, {
+          offX: PHOTO_BOX_RIGHT_X,
+          offY: PHOTO_BOX_OFF_Y,
+          extCx: PHOTO_BOX_RIGHT_WIDTH,
+          extCy: PHOTO_BOX_HEIGHT,
+          buffer: mapImage?.buffer,
+          ext: mapImage?.ext,
+        });
+      }
+
       siteSlideBaseNames.push(slide4Base);
     }
 
@@ -435,17 +505,46 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
       for (const site of sitesByCity[city]) {
         const siteImage = await getImageBuffer(site.mediaImage);
         const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
-        // "Without Location" keeps only the size, dropping the location run entirely instead of
-        // leaving a blank run before it.
-        const locationText = withLocation ? site.location || site.areaName || site.mediaName || site.city || '-' : '';
-        const sizeText = withLocation ? (sizeLabel ? `  ${sizeLabel}` : '') : sizeLabel;
-        const photoBase = await tpl.clonePhotoOnlySlide('slide2', {
-          locationText,
-          sizeText,
-          image: siteImage,
-          boxWidthEMU: 9448801,
-          boxHeightEMU: 6096000,
-        });
+        // The caption itself is unaffected by locationMode — location+size always shows, same
+        // as every other template. What locationMode does control here is the map: this
+        // template's reference design only ever had one full-bleed photo box (no map slot at
+        // all), so "With Location" adds a second box beside a narrowed photo showing a real
+        // route map (or the same "Insert your map image here" placeholder used elsewhere when
+        // coordinates/the map fetch aren't available); "Without Location" keeps the original
+        // single full-bleed photo, unchanged.
+        const locationText = site.location || site.areaName || site.mediaName || site.city || '-';
+        const sizeText = sizeLabel ? `  ${sizeLabel}` : '';
+
+        let photoBase;
+        if (withLocation) {
+          let mapImage = null;
+          const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
+          if (hasCoords) {
+            const mapBuffer = await getRouteMapBuffer({
+              fromLat: client.latitude,
+              fromLng: client.longitude,
+              toLat: site.latitude,
+              toLng: site.longitude,
+            });
+            if (mapBuffer) mapImage = { buffer: mapBuffer, ext: 'png' };
+          }
+          photoBase = await tpl.clonePhotoWithMapSlide('slide2', {
+            locationText,
+            sizeText,
+            image: siteImage,
+            mapImage,
+            leftBoxWidthEMU: 5674400,
+            rightBoxWidthEMU: 3674401,
+          });
+        } else {
+          photoBase = await tpl.clonePhotoOnlySlide('slide2', {
+            locationText,
+            sizeText,
+            image: siteImage,
+            boxWidthEMU: 9448801,
+            boxHeightEMU: 6096000,
+          });
+        }
         insertedBaseNames.push(photoBase);
       }
     }
@@ -517,18 +616,65 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
 
         for (const site of cities[city]) {
           const siteImage = await getImageBuffer(site.mediaImage);
-          // This template's caption is location-only (no size field at all), so "Without
-          // Location" simply leaves it blank — the photo is the only content on the slide.
-          const locationText = withLocation ? site.location || site.areaName || site.mediaName || '-' : '';
+          const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
+          const locationText = site.location || site.areaName || site.mediaName || '-';
+          // Caption always shows location+size in both modes, matching adinn-new-template's
+          // convention — only the map (added below for "With Location") changes with locationMode.
+          const captionText = sizeLabel ? `${locationText} ${sizeLabel}` : locationText;
+
+          // Original photo box (offX=1209675, offY=436563, cy=6005512) spans 9772650 wide with an
+          // equal 1209675 margin on both sides (slide width 12192000). "With Location" splits that
+          // same span into a narrower left photo + a right map box (adinn-photos-only's pattern),
+          // so the pair together still fits exactly where the single photo used to sit.
+          const PHOTO_OFF_X = 1209675;
+          const PHOTO_OFF_Y = 436563;
+          const PHOTO_HEIGHT = 6005512;
+          const LEFT_BOX_WIDTH = withLocation ? 5872650 : 9772650;
+          const GAP = 100000;
+          const RIGHT_BOX_WIDTH = 3800000;
 
           const siteBase = await tpl.cloneCaptionPhotoSlide(siteDetailTpl, {
-            captionText: locationText,
+            captionText,
             image: siteImage,
             relId: 'rId2',
-            boxWidthEMU: 9772650,
-            boxHeightEMU: 6005512,
+            boxWidthEMU: LEFT_BOX_WIDTH,
+            boxHeightEMU: PHOTO_HEIGHT,
             captionAnchorMarker: '<p:cNvSpPr txBox="1">',
           });
+
+          if (withLocation) {
+            await tpl.resizeTextBox(`ppt/slides/${siteBase}.xml`, {
+              offX: PHOTO_OFF_X,
+              offY: PHOTO_OFF_Y,
+              newWidthEMU: LEFT_BOX_WIDTH,
+            });
+
+            let mapImage = null;
+            const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
+            if (hasCoords) {
+              const mapBuffer = await getRouteMapBuffer({
+                fromLat: client.latitude,
+                fromLng: client.longitude,
+                toLat: site.latitude,
+                toLng: site.longitude,
+              });
+              if (mapBuffer) mapImage = { buffer: mapBuffer, ext: 'png' };
+            }
+
+            await tpl.insertImageOrPlaceholder(
+              `ppt/slides/${siteBase}.xml`,
+              `ppt/slides/_rels/${siteBase}.xml.rels`,
+              {
+                offX: PHOTO_OFF_X + LEFT_BOX_WIDTH + GAP,
+                offY: PHOTO_OFF_Y,
+                extCx: RIGHT_BOX_WIDTH,
+                extCy: PHOTO_HEIGHT,
+                buffer: mapImage?.buffer,
+                ext: mapImage?.ext,
+              }
+            );
+          }
+
           insertedBaseNames.push(siteBase);
         }
       }
@@ -586,21 +732,62 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
       for (const site of sitesByCity[city]) {
         const siteImage = await getImageBuffer(site.mediaImage);
         const sizeLabel = site.width && site.height ? `${site.width}x${site.height}` : '';
-        // "Without Location" drops the location part, keeping only the size.
-        let captionText;
-        if (!withLocation) {
-          captionText = sizeLabel;
-        } else {
-          const locationText = site.location || site.areaName || site.mediaName || '-';
-          captionText = sizeLabel ? `${locationText} -${sizeLabel}` : locationText;
-        }
+        const locationText = site.location || site.areaName || site.mediaName || '-';
+        // Caption always shows location+size in both modes — only the map (added below for
+        // "With Location") changes with locationMode, matching adinn-new-template's convention.
+        const captionText = sizeLabel ? `${locationText} -${sizeLabel}` : locationText;
+
+        // Original photo box (offX=571472, offY=928670, cy=4982010) spans 8072494 wide, ending
+        // near the slide's right edge (slide width 9144000). "With Location" splits that same
+        // span into a narrower left photo + a right map box, so the pair fits exactly where the
+        // single photo used to sit — same pattern as publicis-ooh-template/adinn-photos-only.
+        const PHOTO_OFF_X = 571472;
+        const PHOTO_OFF_Y = 928670;
+        const PHOTO_HEIGHT = 4982010;
+        const LEFT_BOX_WIDTH = withLocation ? 4772494 : 8072494;
+        const GAP = 100000;
+        const RIGHT_BOX_WIDTH = 3200000;
 
         const siteBase = await tpl.cloneCaptionPhotoSlide(siteDetailTpl, {
           captionText,
           image: siteImage,
-          boxWidthEMU: 8072494,
-          boxHeightEMU: 4982010,
+          boxWidthEMU: LEFT_BOX_WIDTH,
+          boxHeightEMU: PHOTO_HEIGHT,
         });
+
+        if (withLocation) {
+          await tpl.resizeTextBox(`ppt/slides/${siteBase}.xml`, {
+            offX: PHOTO_OFF_X,
+            offY: PHOTO_OFF_Y,
+            newWidthEMU: LEFT_BOX_WIDTH,
+          });
+
+          let mapImage = null;
+          const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
+          if (hasCoords) {
+            const mapBuffer = await getRouteMapBuffer({
+              fromLat: client.latitude,
+              fromLng: client.longitude,
+              toLat: site.latitude,
+              toLng: site.longitude,
+            });
+            if (mapBuffer) mapImage = { buffer: mapBuffer, ext: 'png' };
+          }
+
+          await tpl.insertImageOrPlaceholder(
+            `ppt/slides/${siteBase}.xml`,
+            `ppt/slides/_rels/${siteBase}.xml.rels`,
+            {
+              offX: PHOTO_OFF_X + LEFT_BOX_WIDTH + GAP,
+              offY: PHOTO_OFF_Y,
+              extCx: RIGHT_BOX_WIDTH,
+              extCy: PHOTO_HEIGHT,
+              buffer: mapImage?.buffer,
+              ext: mapImage?.ext,
+            }
+          );
+        }
+
         insertedBaseNames.push(siteBase);
       }
     }
@@ -660,9 +847,9 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
 
       for (const site of sitesByCity[city]) {
         const siteImage = await getImageBuffer(site.mediaImage);
-        // "Without Location" blanks only the free-text location title — City/State/Media
-        // type/Illumination/Size in the Media Specifications panel below it stay unchanged.
-        const locationText = withLocation ? site.location || site.areaName || site.mediaName || '-' : '';
+        // No separate map element in this template — the title is unaffected by locationMode,
+        // same as the Media Specifications panel below it (City/State/Media type/Illumination/Size).
+        const locationText = site.location || site.areaName || site.mediaName || '-';
         const widthText = site.width != null ? Number(site.width).toFixed(2) : '-';
         const heightText = site.height != null ? Number(site.height).toFixed(2) : '-';
 

@@ -358,6 +358,91 @@ class PptxTemplate {
     return this._registerClonedSlide(slideXml, relsXml);
   }
 
+  // adinn-photos-only's slide2 reference design has only ever had one full-bleed photo — no
+  // second/map box exists in the template. "With Location" mode adds one: the existing photo is
+  // narrowed to `leftBoxWidthEMU` and a new picture (or, with no map available, the same
+  // "Insert your map image here" placeholder used elsewhere) is inserted beside it at
+  // `rightBoxWidthEMU`. Caption text replacement is identical to clonePhotoOnlySlide.
+  async clonePhotoWithMapSlide(
+    templateBaseName,
+    { locationText, sizeText, image, mapImage, relId = 'rId3', leftBoxWidthEMU, rightBoxWidthEMU, gapEMU = 100000 } = {}
+  ) {
+    const slidePath = `ppt/slides/${templateBaseName}.xml`;
+    const relsPath = `ppt/slides/_rels/${templateBaseName}.xml.rels`;
+
+    let slideXml = await this.readText(slidePath);
+    let relsXml = await this.readText(relsPath);
+
+    slideXml = slideXml.replace('<a:t>Yanaikkal junction</a:t>', `<a:t>${xmlEscape(locationText)}</a:t>`);
+    slideXml = slideXml.replace('<a:t>  20x20</a:t>', `<a:t>${xmlEscape(sizeText)}</a:t>`);
+
+    // The slide's root <p:grpSpPr> carries its own (unrelated, all-zero) <a:xfrm> earlier in the
+    // document than the photo's — matching against the whole slideXml would grab that one
+    // instead. The <p:pic>...</p:pic> block is located first, and only its own <a:xfrm> is
+    // read/replaced, leaving the root group transform (and everything else) untouched.
+    const picBlockRe = /<p:pic>[\s\S]*?<\/p:pic>/;
+    const picBlockMatch = slideXml.match(picBlockRe);
+    const picXfrmRe = /(<a:xfrm><a:off x="(-?\d+)" y="(-?\d+)"\/><a:ext cx=")\d+(" cy="(\d+)"\/>)/;
+    let offX = 675481;
+    let offY = 551656;
+    let cy = 6096000;
+    if (picBlockMatch) {
+      const picBlock = picBlockMatch[0];
+      const xfrmMatch = picBlock.match(picXfrmRe);
+      if (xfrmMatch) {
+        offX = parseInt(xfrmMatch[2], 10);
+        offY = parseInt(xfrmMatch[3], 10);
+        // Group 4 is the whole "\" cy=\"NNN\"/>\"" suffix (used below to splice the replacement
+        // back together) — the numeric height itself is group 5.
+        cy = parseInt(xfrmMatch[5], 10);
+        const updatedPicBlock = picBlock.replace(picXfrmRe, `$1${leftBoxWidthEMU}$4`);
+        slideXml = slideXml.slice(0, picBlockMatch.index) + updatedPicBlock + slideXml.slice(picBlockMatch.index + picBlock.length);
+      }
+    }
+
+    if (image && image.buffer) {
+      const newTarget = await this.addMediaFile(image.buffer, image.ext);
+      relsXml = this.replaceRelTarget(relsXml, relId, newTarget);
+
+      const dims = getImageDimensions(image.buffer, image.ext);
+      const rect = dims ? computeCoverFillRect(dims.width, dims.height, leftBoxWidthEMU, cy) : { l: 0, t: 0, r: 0, b: 0 };
+      const target = `<a:blip r:embed="${relId}" cstate="print"><a:lum/></a:blip><a:srcRect/><a:stretch><a:fillRect/></a:stretch>`;
+      const replacement = `<a:blip r:embed="${relId}" cstate="print"><a:lum/></a:blip><a:srcRect l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"/><a:stretch><a:fillRect/></a:stretch>`;
+      slideXml = slideXml.replace(target, replacement);
+    }
+
+    const rightOffX = offX + leftBoxWidthEMU + gapEMU;
+
+    if (mapImage && mapImage.buffer) {
+      const mapTarget = await this.addMediaFile(mapImage.buffer, mapImage.ext);
+      const newRelId = `rIdGen${this._nextRelId++}`;
+      relsXml = relsXml.replace(
+        '</Relationships>',
+        `<Relationship Id="${newRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="${mapTarget}"/></Relationships>`
+      );
+      const dims = getImageDimensions(mapImage.buffer, mapImage.ext);
+      const rect = dims ? computeCoverFillRect(dims.width, dims.height, rightBoxWidthEMU, cy) : { l: 0, t: 0, r: 0, b: 0 };
+      const shapeId = 9500 + this._nextSlideIndex;
+      const mapPic =
+        `<p:pic><p:nvPicPr><p:cNvPr id="${shapeId}" name="Map Picture"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>` +
+        `<p:blipFill><a:blip r:embed="${newRelId}"/><a:srcRect l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>` +
+        `<p:spPr bwMode="white"><a:xfrm><a:off x="${rightOffX}" y="${offY}"/><a:ext cx="${rightBoxWidthEMU}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
+      slideXml = slideXml.replace('</p:spTree>', `${mapPic}</p:spTree>`);
+    } else {
+      const shapeId = 9600 + this._nextSlideIndex;
+      const placeholderSp =
+        `<p:sp><p:nvSpPr><p:cNvPr name="Map Placeholder" id="${shapeId}"/><p:cNvSpPr txBox="true"/><p:nvPr/></p:nvSpPr>` +
+        `<p:spPr><a:xfrm><a:off x="${rightOffX}" y="${offY}"/><a:ext cx="${rightBoxWidthEMU}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+        `<a:ln><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></p:spPr>` +
+        `<p:txBody><a:bodyPr anchor="ctr" wrap="square"><a:normAutofit/></a:bodyPr><a:lstStyle/><a:p><a:pPr algn="ctr"/>` +
+        `<a:r><a:rPr lang="en-US" sz="1800"><a:solidFill><a:srgbClr val="666666"/></a:solidFill><a:latin typeface="Times New Roman MT"/></a:rPr><a:t>Insert your map image here</a:t></a:r>` +
+        `</a:p></p:txBody></p:sp>`;
+      slideXml = slideXml.replace('</p:spTree>', `${placeholderSp}</p:spTree>`);
+    }
+
+    return this._registerClonedSlide(slideXml, relsXml);
+  }
+
   // Shared by Jagran-template-one and publicis-ooh-template's site-image slide: a picture
   // placeholder plus a caption shape whose text is split across several runs purely as a
   // spell-check artifact in the reference files (every run shares identical rPr — sz/bold/font).
@@ -474,16 +559,56 @@ class PptxTemplate {
     let match;
     while ((match = groupRe.exec(slideXml))) {
       if (!match[0].includes(`name="${groupName}"`)) continue;
-      const xfrmMatch = match[0].match(/<a:xfrm><a:off x="(-?\d+)" y="(-?\d+)"\/><a:ext cx="(\d+)" cy="(\d+)"\/>/);
+      // The group's own xfrm may or may not carry a rot="..." attribute (kept as-is either way).
+      const xfrmMatch = match[0].match(/<a:xfrm( rot="-?\d+")?><a:off x="(-?\d+)" y="(-?\d+)"\/><a:ext cx="(\d+)" cy="(\d+)"\/>/);
       if (xfrmMatch) {
-        const [full, x, y, cx, cy] = xfrmMatch;
-        const newXfrm = `<a:xfrm><a:off x="${newOffX ?? x}" y="${y}"/><a:ext cx="${newWidthEMU ?? cx}" cy="${cy}"/>`;
+        const [full, rotAttr, x, y, cx, cy] = xfrmMatch;
+        const newXfrm = `<a:xfrm${rotAttr || ''}><a:off x="${newOffX ?? x}" y="${y}"/><a:ext cx="${newWidthEMU ?? cx}" cy="${cy}"/>`;
         const updatedBlock = match[0].replace(full, newXfrm);
         slideXml = slideXml.slice(0, match.index) + updatedBlock + slideXml.slice(match.index + match[0].length);
       }
       break;
     }
     this.writeText(slidePath, slideXml);
+  }
+
+  // Inserts a brand-new <p:pic> (a real image, e.g. a fetched route map) or, with no buffer, the
+  // same "Insert your map image here" placeholder text used elsewhere, at an arbitrary position.
+  // Used by templates whose reference design never had a second/map box at all, so one has to be
+  // added rather than merely shown/hidden.
+  async insertImageOrPlaceholder(slidePath, relsPath, { offX, offY, extCx, extCy, buffer, ext, placeholderText = 'Insert your map image here' }) {
+    let slideXml = await this.readText(slidePath);
+    let relsXml = await this.readText(relsPath);
+
+    if (buffer) {
+      const target = await this.addMediaFile(buffer, ext);
+      const newRelId = `rIdGen${this._nextRelId++}`;
+      relsXml = relsXml.replace(
+        '</Relationships>',
+        `<Relationship Id="${newRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="${target}"/></Relationships>`
+      );
+      const dims = getImageDimensions(buffer, ext);
+      const rect = dims ? computeCoverFillRect(dims.width, dims.height, extCx, extCy) : { l: 0, t: 0, r: 0, b: 0 };
+      const shapeId = 9700 + this._nextSlideIndex;
+      const pic =
+        `<p:pic><p:nvPicPr><p:cNvPr id="${shapeId}" name="Map Picture"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>` +
+        `<p:blipFill><a:blip r:embed="${newRelId}"/><a:srcRect l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>` +
+        `<p:spPr bwMode="white"><a:xfrm><a:off x="${offX}" y="${offY}"/><a:ext cx="${extCx}" cy="${extCy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
+      slideXml = slideXml.replace('</p:spTree>', `${pic}</p:spTree>`);
+    } else {
+      const shapeId = 9800 + this._nextSlideIndex;
+      const sp =
+        `<p:sp><p:nvSpPr><p:cNvPr name="Map Placeholder" id="${shapeId}"/><p:cNvSpPr txBox="true"/><p:nvPr/></p:nvSpPr>` +
+        `<p:spPr><a:xfrm><a:off x="${offX}" y="${offY}"/><a:ext cx="${extCx}" cy="${extCy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+        `<a:ln><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></p:spPr>` +
+        `<p:txBody><a:bodyPr anchor="ctr" wrap="square"><a:normAutofit/></a:bodyPr><a:lstStyle/><a:p><a:pPr algn="ctr"/>` +
+        `<a:r><a:rPr lang="en-US" sz="1800"><a:solidFill><a:srgbClr val="666666"/></a:solidFill><a:latin typeface="Times New Roman MT"/></a:rPr><a:t>${xmlEscape(placeholderText)}</a:t></a:r>` +
+        `</a:p></p:txBody></p:sp>`;
+      slideXml = slideXml.replace('</p:spTree>', `${sp}</p:spTree>`);
+    }
+
+    this.writeText(slidePath, slideXml);
+    this.writeText(relsPath, relsXml);
   }
 
   // Widens (and optionally re-centers) a single textbox on a given slide part, matched by its
