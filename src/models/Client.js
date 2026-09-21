@@ -12,8 +12,10 @@ const clientSchema = new mongoose.Schema(
     location: { type: String, trim: true },
     latitude: { type: Number, min: -90, max: 90 },
     longitude: { type: Number, min: -180, max: 180 },
-    agencyComm: { type: Number, min: 0 },
-    gst: { type: String, trim: true },
+    agencyComm: { type: Number, min: 0, max: 100 },
+    // Percentage (e.g. 18 means 18%), used by Excel generation's Adinn dynamic fee columns —
+    // not a GST registration number.
+    gst: { type: Number, min: 0, max: 100 },
     vendorName: { type: String, trim: true },
     vendorCost: { type: Number, min: 0 },
     notes: String,

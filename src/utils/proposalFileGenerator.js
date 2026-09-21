@@ -2,9 +2,11 @@ const fs = require('fs');
 const path = require('path');
 const { PptxTemplate, extOf } = require('./pptxTemplateEngine');
 const { generateExcelFromTemplate } = require('./excelTemplateEngine');
+const { getExcelConfig } = require('../config/excelTemplateConfigs');
 const { getRouteMapBuffer } = require('./mapService');
-const { uploadFile, uploadFileToCloud } = require('./storageService');
+const { uploadFileToCloud } = require('./storageService');
 const PPTTemplate = require('../models/PPTTemplate');
+const ExcelTemplate = require('../models/ExcelTemplate');
 
 const BACKEND_ROOT = path.join(__dirname, '..', '..');
 
@@ -66,16 +68,20 @@ function formatDisplayDate(date) {
   return new Intl.DateTimeFormat('en-US', { day: '2-digit', month: 'short', year: 'numeric' }).format(date);
 }
 
-// Shared generated-PPTX file name convention across every template: "<Client>-<DD>-<Month>-
-// <YYYY>-<proposalId>.pptx" (e.g. "ROTN-19-September-2026-PR-MU83CUXH.pptx"), using today's
-// date at generation time — not the proposal's original creation date (that's only used for the
-// cloud storage folder segment, so a regenerate overwrites the same folder/object).
-function buildGeneratedPptFileName(proposal, client, now) {
+// Shared generated-file name convention across every template AND both PPT/Excel: "<Client>-
+// <DD>-<Month>-<YYYY>-<proposalId>.<ext>" (e.g. "ROTN-19-September-2026-PR-MU83CUXH.pptx"),
+// using today's date at generation time — not the proposal's original creation date (that's only
+// used for the cloud storage folder segment, so a regenerate overwrites the same folder/object).
+function buildGeneratedFileName(proposal, client, now, ext) {
   const clientNameSafe = sanitizePathSegment(client.name);
   const dd = String(now.getDate()).padStart(2, '0');
   const monthWords = now.toLocaleString('en-US', { month: 'long' });
   const yyyy = now.getFullYear();
-  return `${clientNameSafe}-${dd}-${monthWords}-${yyyy}-${proposal.proposalId}.pptx`;
+  return `${clientNameSafe}-${dd}-${monthWords}-${yyyy}-${proposal.proposalId}.${ext}`;
+}
+
+function buildGeneratedPptFileName(proposal, client, now) {
+  return buildGeneratedFileName(proposal, client, now, 'pptx');
 }
 
 async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
@@ -435,7 +441,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
             ['40x30', sizeLabel || '-'],
             ['Hoarding', site.mediaType || '-'],
             ['Frontlit', site.illumination || '-'],
-            ['1', site.sizeUnit || '-'],
+            ['1', site.quantity != null ? String(site.quantity) : '-'],
           ],
           images: siteImage ? [{ relId: 'rId6', ...siteImage, boxWidthEMU: 11366193, boxHeightEMU: 7736815 }] : [],
           boxWidths: ADINN_MEDIA_SPEC_BOX_WIDTHS,
@@ -1075,43 +1081,82 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
   return pptUrl;
 }
 
-function generateProposalExcel(proposal) {
-  const client = proposal.client || {};
+// Generic field shape every Excel format's `columns` config reads from — add a new field here
+// first if a new Site field needs to appear in some format, then reference it by name in that
+// format's config entry.
+function buildExcelRow(site, index) {
+  return {
+    siNo: index + 1,
+    state: site.state || '',
+    city: site.city || '',
+    media: site.mediaId || '',
+    location: site.location || site.areaName || '',
+    qty: site.quantity || 1,
+    width: site.width || 0,
+    height: site.height || 0,
+    type: site.illumination || '',
+    durationDays: site.bookingInfo?.durationDays || '',
+    displayCostPerMonth: site.monthlyAmount || 0,
+    printingCost: site.printingCost || 0,
+    mountingCost: site.mountingCost || 0,
+    siteStatus: site.mediaStatus ? site.mediaStatus.charAt(0).toUpperCase() + site.mediaStatus.slice(1) : '',
+  };
+}
 
-  const rows = (proposal.sites || []).map((s, i) => ({
-    siNo: i + 1,
-    city: s.city,
-    media: s.mediaId,
-    location: s.location || s.areaName || '',
-    qty: s.quantity || 1,
-    width: s.width || 0,
-    height: s.height || 0,
-    type: s.illumination || '',
-    displayCostPerMonth: s.monthlyAmount || 0,
-    siteStatus: s.mediaStatus ? s.mediaStatus.charAt(0).toUpperCase() + s.mediaStatus.slice(1) : '',
-    vendorName: client.vendorName || '',
-    vendorCost: client.vendorCost || 0,
-  }));
-
-  return generateExcelFromTemplate(rows).then(async (buffer) => {
-    let excelUrl;
-    try {
-      excelUrl = await uploadFile(
-        buffer,
-        `${proposal.proposalId}.xlsx`,
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'generated'
-      );
-    } catch (spaceErr) {
-      console.warn('Cloud storage upload failed for Excel, falling back to local storage:', spaceErr.message);
-      const localDir = path.join(BACKEND_ROOT, 'uploads', 'generated');
-      fs.mkdirSync(localDir, { recursive: true });
-      const localPath = path.join(localDir, `${proposal.proposalId}.xlsx`);
-      fs.writeFileSync(localPath, buffer);
-      excelUrl = `/uploads/generated/${proposal.proposalId}.xlsx`;
+// Resolves the proposal's Excel Template doc (whether already populated or just an ObjectId
+// string) to its uploaded file's URL + the format config that describes that file's layout —
+// falling back to the bundled 'generic' (Adinn) config/master file when no template is set.
+async function resolveExcelTemplate(proposal) {
+  let tplDoc = null;
+  if (proposal.excelTemplate) {
+    if (typeof proposal.excelTemplate === 'object' && proposal.excelTemplate.fileUrl) {
+      tplDoc = proposal.excelTemplate;
+    } else if (typeof proposal.excelTemplate === 'string') {
+      tplDoc = await ExcelTemplate.findById(proposal.excelTemplate);
     }
-    return excelUrl;
-  });
+  }
+  return { fileUrl: tplDoc?.fileUrl || null, config: getExcelConfig(tplDoc?.formatKey || 'generic') };
+}
+
+async function loadExcelTemplateBuffer(fileUrl) {
+  if (!fileUrl) return null;
+  if (/^https?:\/\//i.test(fileUrl)) {
+    const res = await fetch(fileUrl);
+    if (!res.ok) throw new Error(`Failed to fetch Excel template (${res.status})`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+  const abs = path.resolve(BACKEND_ROOT, fileUrl.replace(/^\//, ''));
+  return fs.existsSync(abs) ? fs.readFileSync(abs) : null;
+}
+
+async function generateProposalExcel(proposal) {
+  const client = proposal.client || {};
+  const rows = (proposal.sites || []).map((s, i) => buildExcelRow(s, i));
+
+  const { fileUrl, config } = await resolveExcelTemplate(proposal);
+  const buffer = await loadExcelTemplateBuffer(fileUrl);
+
+  const outBuffer = await generateExcelFromTemplate(rows, { buffer: buffer || undefined, config, client });
+  const fileName = buildGeneratedFileName(proposal, client, new Date(), 'xlsx');
+
+  try {
+    // uploadFileToCloud (unlike uploadFile) uses the given fileName as the storage key as-is,
+    // instead of discarding it for a randomized one — same call PPT generation already uses, so
+    // the friendly "<Client>-<DD>-<Month>-<YYYY>-<proposalId>.xlsx" name survives into the actual
+    // download instead of showing a random storage-generated name.
+    return await uploadFileToCloud(
+      outBuffer,
+      fileName,
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'generated'
+    );
+  } catch (spaceErr) {
+    console.warn('Cloud storage upload failed for Excel, falling back to local storage:', spaceErr.message);
+    const localDir = path.join(BACKEND_ROOT, 'uploads', 'generated');
+    fs.mkdirSync(localDir, { recursive: true });
+    fs.writeFileSync(path.join(localDir, fileName), outBuffer);
+    return `/uploads/generated/${fileName}`;
+  }
 }
 
 module.exports = { generateProposalPpt, generateProposalExcel };
