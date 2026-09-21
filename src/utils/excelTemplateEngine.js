@@ -170,6 +170,14 @@ function removeColumns(sheetXml, lettersToRemove) {
 // Reverse of removeColumns for a single column: shifts every cell/col-width/mergeCell/
 // dimension at or after `beforeLetter` one column to the RIGHT, opening up an empty column
 // at `beforeLetter` — it does not create any cell content there itself (see insertCellInRow).
+// Excel's absolute column limit (XFD) — a sheet's own trailing "rest of the sheet" <col> range
+// (e.g. min="19" max="16384", covering every otherwise-undefined column) already sits AT this
+// ceiling in most templates, so incrementing its max on every insertColumnBefore call (once per
+// inserted fee column) pushes it past 16384 — an out-of-range value Excel rejects as corrupt
+// "column information" and silently repairs on open, which can drop unrelated formatting (e.g.
+// row borders) as a side effect. Clamping keeps every <col> range within the sheet's real bounds.
+const MAX_EXCEL_COLUMN = 16384;
+
 function insertColumnBefore(sheetXml, beforeLetter) {
   const insertNum = colToNum(beforeLetter);
   sheetXml = sheetXml.replace(/<c r="([A-Z]+)(\d+)"/g, (whole, col, row) => {
@@ -182,8 +190,8 @@ function insertColumnBefore(sheetXml, beforeLetter) {
     if (!minM || !maxM) return whole;
     let min = Number(minM[1]);
     let max = Number(maxM[1]);
-    if (min >= insertNum) min += 1;
-    if (max >= insertNum) max += 1;
+    if (min >= insertNum) min = Math.min(min + 1, MAX_EXCEL_COLUMN);
+    if (max >= insertNum) max = Math.min(max + 1, MAX_EXCEL_COLUMN);
     return `<col ${attrs.replace(/min="\d+"/, `min="${min}"`).replace(/max="\d+"/, `max="${max}"`)}/>`;
   });
   sheetXml = sheetXml.replace(/<mergeCell ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"\/>/g, (whole, c1, r1, c2, r2) => {
@@ -671,6 +679,30 @@ async function generateExcelFromTemplate(rows, { buffer, config, client } = {}) 
   }
 
   zip.file(sheetPath, sheetXml);
+
+  // Every uploaded master file ships its own xl/calcChain.xml — Excel's cell-recalculation-order
+  // cache, built for the ORIGINAL file's exact formula layout. None of the row/column
+  // insert/delete/move operations above touch it, so after heavy edits (ROTN's block collapsing,
+  // Adinn/ROTN/Jagran's fee column insert/remove, moving the Total row) it no longer matches the
+  // sheet's actual formulas — Excel detects the mismatch on open and silently "repairs" the file,
+  // which can drop formatting (e.g. row borders) as a side effect. It's dropped entirely here
+  // (from the zip, [Content_Types].xml, and workbook.xml.rels) rather than attempting to keep it
+  // in sync — it's purely a performance cache, not required for correctness, and `fullCalcOnLoad`
+  // (set above) already makes Excel recompute every formula fresh the moment the file opens, so
+  // losing the cache has no visible effect beyond a very slightly slower first calculation.
+  if (zip.file('xl/calcChain.xml')) {
+    zip.remove('xl/calcChain.xml');
+    if (zip.file('[Content_Types].xml')) {
+      let contentTypes = await zip.file('[Content_Types].xml').async('string');
+      contentTypes = contentTypes.replace(/<Override[^>]*PartName="\/xl\/calcChain\.xml"[^>]*\/>/, '');
+      zip.file('[Content_Types].xml', contentTypes);
+    }
+    if (zip.file('xl/_rels/workbook.xml.rels')) {
+      let workbookRels = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+      workbookRels = workbookRels.replace(/<Relationship[^>]*Type="[^"]*\/calcChain"[^>]*\/>/, '');
+      zip.file('xl/_rels/workbook.xml.rels', workbookRels);
+    }
+  }
 
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
 }

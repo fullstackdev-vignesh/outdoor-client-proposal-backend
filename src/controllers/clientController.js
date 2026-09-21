@@ -39,7 +39,8 @@ const getClient = asyncHandler(async (req, res) => {
 
 function validateClientPayload(body, { requireGeo = false } = {}) {
   const errors = [];
-  const num = (v) => (v === '' || v === undefined || v === null ? undefined : Number(v));
+  const isBlank = (v) => v === '' || v === undefined || v === null;
+  const num = (v) => (isBlank(v) ? undefined : Number(v));
 
   if (!body.name || !String(body.name).trim()) {
     errors.push(body.customerType === 'agency' ? 'Agency name is required' : 'Client name is required');
@@ -47,18 +48,21 @@ function validateClientPayload(body, { requireGeo = false } = {}) {
   if (body.customerType && !['client', 'agency'].includes(body.customerType)) {
     errors.push('Invalid customer type');
   }
-  if (requireGeo && (body.latitude === undefined || body.latitude === '')) errors.push('Latitude is required');
-  if (requireGeo && (body.longitude === undefined || body.longitude === '')) errors.push('Longitude is required');
-  if (body.latitude !== undefined && body.latitude !== '' && (isNaN(num(body.latitude)) || num(body.latitude) < -90 || num(body.latitude) > 90)) {
+  if (requireGeo && isBlank(body.latitude)) errors.push('Latitude is required');
+  if (requireGeo && isBlank(body.longitude)) errors.push('Longitude is required');
+  if (!isBlank(body.latitude) && (isNaN(num(body.latitude)) || num(body.latitude) < -90 || num(body.latitude) > 90)) {
     errors.push('Latitude must be between -90 and 90');
   }
-  if (body.longitude !== undefined && body.longitude !== '' && (isNaN(num(body.longitude)) || num(body.longitude) < -180 || num(body.longitude) > 180)) {
+  if (!isBlank(body.longitude) && (isNaN(num(body.longitude)) || num(body.longitude) < -180 || num(body.longitude) > 180)) {
     errors.push('Longitude must be between -180 and 180');
   }
-  if (body.agencyComm !== undefined && body.agencyComm !== '' && (isNaN(num(body.agencyComm)) || num(body.agencyComm) < 0)) {
+  if (!isBlank(body.agencyComm) && (isNaN(num(body.agencyComm)) || num(body.agencyComm) < 0)) {
     errors.push('Agency Comm must be a number greater than or equal to 0');
   }
-  if (body.vendorCost !== undefined && body.vendorCost !== '' && (isNaN(num(body.vendorCost)) || num(body.vendorCost) < 0)) {
+  if (!isBlank(body.gst) && (isNaN(num(body.gst)) || num(body.gst) < 0 || num(body.gst) > 100)) {
+    errors.push('GST must be a percentage between 0 and 100');
+  }
+  if (!isBlank(body.vendorCost) && (isNaN(num(body.vendorCost)) || num(body.vendorCost) < 0)) {
     errors.push('Vendor Cost must be a number greater than or equal to 0');
   }
   return errors;
