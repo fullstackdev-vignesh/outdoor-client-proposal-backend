@@ -540,7 +540,8 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
 
     const insertedBaseNames = [];
     for (const city of cityOrder) {
-      const cityDividerBase = await tpl.cloneSlide('slide1', { textReplacements: [['Madurai', city]] });
+       const cityDividerBase = await tpl.cloneSlide('slide2', { textReplacements: [['Madurai', city]] });
+
       insertedBaseNames.push(cityDividerBase);
 
       for (const site of sitesByCity[city]) {
@@ -559,7 +560,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
         let photoBase;
         if (withLocation) {
           const { mapImage, routeLabel } = await fetchRouteMap(client, site);
-          photoBase = await tpl.clonePhotoWithMapSlide('slide2', {
+           photoBase = await tpl.clonePhotoWithMapSlide('slide3', {
             locationText,
             sizeText,
             image: siteImage,
@@ -569,7 +570,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
             rightBoxWidthEMU: 3674401,
           });
         } else {
-          photoBase = await tpl.clonePhotoOnlySlide('slide2', {
+           photoBase = await tpl.clonePhotoOnlySlide('slide3', {
             locationText,
             sizeText,
             image: siteImage,
@@ -581,7 +582,8 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
       }
     }
 
-    await tpl.setFinalSlideOrder(insertedBaseNames);
+    await tpl.setFinalSlideOrder([staticFirstSlide, ...insertedBaseNames, staticLastSlide]);
+
 
     const buffer = await tpl.save();
     const clientNameSafe = sanitizePathSegment(client.name);
