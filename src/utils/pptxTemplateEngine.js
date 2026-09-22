@@ -365,7 +365,7 @@ class PptxTemplate {
   // `rightBoxWidthEMU`. Caption text replacement is identical to clonePhotoOnlySlide.
   async clonePhotoWithMapSlide(
     templateBaseName,
-    { locationText, sizeText, image, mapImage, relId = 'rId3', leftBoxWidthEMU, rightBoxWidthEMU, gapEMU = 100000 } = {}
+    { locationText, sizeText, image, mapImage, mapLabel, relId = 'rId3', leftBoxWidthEMU, rightBoxWidthEMU, gapEMU = 100000 } = {}
   ) {
     const slidePath = `ppt/slides/${templateBaseName}.xml`;
     const relsPath = `ppt/slides/_rels/${templateBaseName}.xml.rels`;
@@ -428,6 +428,19 @@ class PptxTemplate {
         `<p:blipFill><a:blip r:embed="${newRelId}"/><a:srcRect l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>` +
         `<p:spPr bwMode="white"><a:xfrm><a:off x="${rightOffX}" y="${offY}"/><a:ext cx="${rightBoxWidthEMU}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
       slideXml = slideXml.replace('</p:spTree>', `${mapPic}</p:spTree>`);
+
+      if (mapLabel) {
+        const labelHeight = Math.min(380000, cy);
+        const labelShapeId = 9550 + this._nextSlideIndex;
+        const labelSp =
+          `<p:sp><p:nvSpPr><p:cNvPr name="Route Info" id="${labelShapeId}"/><p:cNvSpPr txBox="true"/><p:nvPr/></p:nvSpPr>` +
+          `<p:spPr><a:xfrm><a:off x="${rightOffX}" y="${offY + cy - labelHeight}"/><a:ext cx="${rightBoxWidthEMU}" cy="${labelHeight}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+          `<a:solidFill><a:srgbClr val="FFFFFF"><a:alpha val="85000"/></a:srgbClr></a:solidFill><a:ln><a:noFill/></a:ln></p:spPr>` +
+          `<p:txBody><a:bodyPr anchor="ctr" wrap="square"><a:noAutofit/></a:bodyPr><a:lstStyle/><a:p><a:pPr algn="ctr"/>` +
+          `<a:r><a:rPr lang="en-US" sz="1400" b="1"><a:solidFill><a:srgbClr val="C2221E"/></a:solidFill></a:rPr><a:t>${xmlEscape(mapLabel)}</a:t></a:r>` +
+          `</a:p></p:txBody></p:sp>`;
+        slideXml = slideXml.replace('</p:spTree>', `${labelSp}</p:spTree>`);
+      }
     } else {
       const shapeId = 9600 + this._nextSlideIndex;
       const placeholderSp =
@@ -640,6 +653,26 @@ class PptxTemplate {
 
     this.writeText(slidePath, slideXml);
     this.writeText(relsPath, relsXml);
+  }
+
+  // Draws a small "19 mins • 6.8 km" style route-info strip at the bottom edge of a map box
+  // (real Google route maps only — never shown over the "Insert your map image here"
+  // placeholder). No-op when `text` is empty/falsy, so callers can pass it unconditionally.
+  async insertMapLabel(slidePath, { offX, offY, extCx, extCy, text }) {
+    if (!text) return;
+    let slideXml = await this.readText(slidePath);
+    const shapeId = 9900 + this._nextSlideIndex;
+    const labelHeight = Math.min(380000, extCy);
+    const labelOffY = offY + extCy - labelHeight;
+    const sp =
+      `<p:sp><p:nvSpPr><p:cNvPr name="Route Info" id="${shapeId}"/><p:cNvSpPr txBox="true"/><p:nvPr/></p:nvSpPr>` +
+      `<p:spPr><a:xfrm><a:off x="${offX}" y="${labelOffY}"/><a:ext cx="${extCx}" cy="${labelHeight}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+      `<a:solidFill><a:srgbClr val="FFFFFF"><a:alpha val="85000"/></a:srgbClr></a:solidFill><a:ln><a:noFill/></a:ln></p:spPr>` +
+      `<p:txBody><a:bodyPr anchor="ctr" wrap="square"><a:noAutofit/></a:bodyPr><a:lstStyle/><a:p><a:pPr algn="ctr"/>` +
+      `<a:r><a:rPr lang="en-US" sz="1400" b="1"><a:solidFill><a:srgbClr val="C2221E"/></a:solidFill></a:rPr><a:t>${xmlEscape(text)}</a:t></a:r>` +
+      `</a:p></p:txBody></p:sp>`;
+    slideXml = slideXml.replace('</p:spTree>', `${sp}</p:spTree>`);
+    this.writeText(slidePath, slideXml);
   }
 
   // Widens (and optionally re-centers) a single textbox on a given slide part, matched by its

@@ -36,6 +36,24 @@ function sanitizePathSegment(value) {
   );
 }
 
+// Shared by every template's "With Location" map fetch — resolves client<->site coordinates to
+// a real Google route map image plus a short "19 mins • 6.8 km" label (or nulls when
+// coordinates are missing or the Google API call fails, in which case callers fall back to the
+// usual "Insert your map image here" placeholder and skip the label entirely).
+async function fetchRouteMap(client, site) {
+  const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
+  if (!hasCoords) return { mapImage: null, routeLabel: null };
+  const result = await getRouteMapBuffer({
+    fromLat: client.latitude,
+    fromLng: client.longitude,
+    toLat: site.latitude,
+    toLng: site.longitude,
+  });
+  if (!result) return { mapImage: null, routeLabel: null };
+  const routeLabel = [result.durationText, result.distanceText].filter(Boolean).join(' • ') || null;
+  return { mapImage: { buffer: result.buffer, ext: 'png' }, routeLabel };
+}
+
 async function getImageBuffer(image) {
   if (!image) return null;
   if (!/^https?:\/\//i.test(image)) {
@@ -184,17 +202,9 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
       const siteImage = await getImageBuffer(site.mediaImage);
 
       let mapImage = null;
+      let routeLabel = null;
       if (withLocation) {
-        const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
-        if (hasCoords) {
-          const mapBuffer = await getRouteMapBuffer({
-            fromLat: client.latitude,
-            fromLng: client.longitude,
-            toLat: site.latitude,
-            toLng: site.longitude,
-          });
-          if (mapBuffer) mapImage = { buffer: mapBuffer, ext: 'png' };
-        }
+        ({ mapImage, routeLabel } = await fetchRouteMap(client, site));
       }
 
       const images = [];
@@ -230,6 +240,15 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
               }
             : undefined,
       });
+      if (mapImage && routeLabel) {
+        await tpl.insertMapLabel(`ppt/slides/${slideBase}.xml`, {
+          offX: 11739398,
+          offY: 2105609,
+          extCx: 5775471,
+          extCy: 7076491,
+          text: routeLabel,
+        });
+      }
       siteSlideBaseNames.push(slideBase);
     }
 
@@ -353,25 +372,21 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
       });
 
       if (withLocation) {
-        let mapImage = null;
-        const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
-        if (hasCoords) {
-          const mapBuffer = await getRouteMapBuffer({
-            fromLat: client.latitude,
-            fromLng: client.longitude,
-            toLat: site.latitude,
-            toLng: site.longitude,
-          });
-          if (mapBuffer) mapImage = { buffer: mapBuffer, ext: 'png' };
-        }
-        await tpl.insertImageOrPlaceholder(`ppt/slides/${slide4Base}.xml`, `ppt/slides/_rels/${slide4Base}.xml.rels`, {
+        const { mapImage, routeLabel } = await fetchRouteMap(client, site);
+        const mapBoxRect = {
           offX: PHOTO_BOX_RIGHT_X,
           offY: PHOTO_BOX_OFF_Y,
           extCx: PHOTO_BOX_RIGHT_WIDTH,
           extCy: PHOTO_BOX_HEIGHT,
+        };
+        await tpl.insertImageOrPlaceholder(`ppt/slides/${slide4Base}.xml`, `ppt/slides/_rels/${slide4Base}.xml.rels`, {
+          ...mapBoxRect,
           buffer: mapImage?.buffer,
           ext: mapImage?.ext,
         });
+        if (mapImage && routeLabel) {
+          await tpl.insertMapLabel(`ppt/slides/${slide4Base}.xml`, { ...mapBoxRect, text: routeLabel });
+        }
       }
 
       siteSlideBaseNames.push(slide4Base);
@@ -450,20 +465,25 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
         continue;
       }
 
-      // Slide 5 — site + map: title, bordered site-photo box, map image cleared to a placeholder.
-      // Same reasoning as slide 4: leave the full-bleed background (rId2) untouched.
+      // Slide 5 — site + map: title, bordered site-photo box, real Google route map (rId5's own
+      // background image slot) when coordinates/API are available, else the usual "Insert your
+      // map image here" placeholder. Same reasoning as slide 4: leave the full-bleed background
+      // (rId2) untouched.
+      const mapBoxRect = { offX: 11605227, offY: 1587800, extCx: 6508010, extCy: 7646052 };
+      const { mapImage, routeLabel } = await fetchRouteMap(client, site);
+      const slide5Images = siteImage ? [{ relId: 'rId9', ...siteImage, boxWidthEMU: 10484172, boxHeightEMU: 7646052 }] : [];
+      if (mapImage) {
+        slide5Images.push({ relId: 'rId5', ...mapImage, boxWidthEMU: mapBoxRect.extCx, boxHeightEMU: mapBoxRect.extCy });
+      }
       const slide5Base = await tpl.cloneAdinnSiteSlide('slide5', {
         textReplacements: [titleReplacement],
-        images: siteImage ? [{ relId: 'rId9', ...siteImage, boxWidthEMU: 10484172, boxHeightEMU: 7646052 }] : [],
-        clearImageRelId: 'rId5',
-        placeholderText: {
-          offX: 11605227,
-          offY: 1587800,
-          extCx: 6508010,
-          extCy: 7646052,
-          text: 'Insert your map image here',
-        },
+        images: slide5Images,
+        clearImageRelId: mapImage ? undefined : 'rId5',
+        placeholderText: mapImage ? undefined : { ...mapBoxRect, text: 'Insert your map image here' },
       });
+      if (mapImage && routeLabel) {
+        await tpl.insertMapLabel(`ppt/slides/${slide5Base}.xml`, { ...mapBoxRect, text: routeLabel });
+      }
       siteSlideBaseNames.push(slide5Base);
     }
 
@@ -523,22 +543,13 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
 
         let photoBase;
         if (withLocation) {
-          let mapImage = null;
-          const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
-          if (hasCoords) {
-            const mapBuffer = await getRouteMapBuffer({
-              fromLat: client.latitude,
-              fromLng: client.longitude,
-              toLat: site.latitude,
-              toLng: site.longitude,
-            });
-            if (mapBuffer) mapImage = { buffer: mapBuffer, ext: 'png' };
-          }
+          const { mapImage, routeLabel } = await fetchRouteMap(client, site);
           photoBase = await tpl.clonePhotoWithMapSlide('slide2', {
             locationText,
             sizeText,
             image: siteImage,
             mapImage,
+            mapLabel: routeLabel,
             leftBoxWidthEMU: 5674400,
             rightBoxWidthEMU: 3674401,
           });
@@ -655,30 +666,22 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
               newWidthEMU: LEFT_BOX_WIDTH,
             });
 
-            let mapImage = null;
-            const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
-            if (hasCoords) {
-              const mapBuffer = await getRouteMapBuffer({
-                fromLat: client.latitude,
-                fromLng: client.longitude,
-                toLat: site.latitude,
-                toLng: site.longitude,
-              });
-              if (mapBuffer) mapImage = { buffer: mapBuffer, ext: 'png' };
-            }
+            const { mapImage, routeLabel } = await fetchRouteMap(client, site);
+            const mapBoxRect = {
+              offX: PHOTO_OFF_X + LEFT_BOX_WIDTH + GAP,
+              offY: PHOTO_OFF_Y,
+              extCx: RIGHT_BOX_WIDTH,
+              extCy: PHOTO_HEIGHT,
+            };
 
             await tpl.insertImageOrPlaceholder(
               `ppt/slides/${siteBase}.xml`,
               `ppt/slides/_rels/${siteBase}.xml.rels`,
-              {
-                offX: PHOTO_OFF_X + LEFT_BOX_WIDTH + GAP,
-                offY: PHOTO_OFF_Y,
-                extCx: RIGHT_BOX_WIDTH,
-                extCy: PHOTO_HEIGHT,
-                buffer: mapImage?.buffer,
-                ext: mapImage?.ext,
-              }
+              { ...mapBoxRect, buffer: mapImage?.buffer, ext: mapImage?.ext }
             );
+            if (mapImage && routeLabel) {
+              await tpl.insertMapLabel(`ppt/slides/${siteBase}.xml`, { ...mapBoxRect, text: routeLabel });
+            }
           }
 
           insertedBaseNames.push(siteBase);
@@ -768,30 +771,22 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
             newWidthEMU: LEFT_BOX_WIDTH,
           });
 
-          let mapImage = null;
-          const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
-          if (hasCoords) {
-            const mapBuffer = await getRouteMapBuffer({
-              fromLat: client.latitude,
-              fromLng: client.longitude,
-              toLat: site.latitude,
-              toLng: site.longitude,
-            });
-            if (mapBuffer) mapImage = { buffer: mapBuffer, ext: 'png' };
-          }
+          const { mapImage, routeLabel } = await fetchRouteMap(client, site);
+          const mapBoxRect = {
+            offX: PHOTO_OFF_X + LEFT_BOX_WIDTH + GAP,
+            offY: PHOTO_OFF_Y,
+            extCx: RIGHT_BOX_WIDTH,
+            extCy: PHOTO_HEIGHT,
+          };
 
           await tpl.insertImageOrPlaceholder(
             `ppt/slides/${siteBase}.xml`,
             `ppt/slides/_rels/${siteBase}.xml.rels`,
-            {
-              offX: PHOTO_OFF_X + LEFT_BOX_WIDTH + GAP,
-              offY: PHOTO_OFF_Y,
-              extCx: RIGHT_BOX_WIDTH,
-              extCy: PHOTO_HEIGHT,
-              buffer: mapImage?.buffer,
-              ext: mapImage?.ext,
-            }
+            { ...mapBoxRect, buffer: mapImage?.buffer, ext: mapImage?.ext }
           );
+          if (mapImage && routeLabel) {
+            await tpl.insertMapLabel(`ppt/slides/${siteBase}.xml`, { ...mapBoxRect, text: routeLabel });
+          }
         }
 
         insertedBaseNames.push(siteBase);
@@ -904,30 +899,17 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
             extCy: 5532209,
           });
 
-          let mapImage = null;
-          const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
-          if (hasCoords) {
-            const mapBuffer = await getRouteMapBuffer({
-              fromLat: client.latitude,
-              fromLng: client.longitude,
-              toLat: site.latitude,
-              toLng: site.longitude,
-            });
-            if (mapBuffer) mapImage = { buffer: mapBuffer, ext: 'png' };
-          }
+          const { mapImage, routeLabel } = await fetchRouteMap(client, site);
+          const mapBoxRect = { offX: 10997898, offY: 3008554, extCx: 5982040, extCy: 5332209 };
 
           await tpl.insertImageOrPlaceholder(
             `ppt/slides/${siteBase}.xml`,
             `ppt/slides/_rels/${siteBase}.xml.rels`,
-            {
-              offX: 10997898,
-              offY: 3008554,
-              extCx: 5982040,
-              extCy: 5332209,
-              buffer: mapImage?.buffer,
-              ext: mapImage?.ext,
-            }
+            { ...mapBoxRect, buffer: mapImage?.buffer, ext: mapImage?.ext }
           );
+          if (mapImage && routeLabel) {
+            await tpl.insertMapLabel(`ppt/slides/${siteBase}.xml`, { ...mapBoxRect, text: routeLabel });
+          }
         }
 
         insertedBaseNames.push(siteBase);
@@ -1027,20 +1009,20 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
 
       const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
       if (hasCoords && siteMapTpl) {
-        const mapBuffer = await getRouteMapBuffer({
+        const mapResult = await getRouteMapBuffer({
           fromLat: client.latitude,
           fromLng: client.longitude,
           toLat: site.latitude,
           toLng: site.longitude,
         });
-        if (mapBuffer) {
+        if (mapResult) {
           const mapBase = await tpl.cloneSlide(
             siteMapTpl,
             {
               textReplacements: specTextReplacements,
               imageReplacements: [
                 ...(siteImage ? [siteImage, siteImage] : []),
-                { buffer: mapBuffer, ext: 'png' },
+                { buffer: mapResult.buffer, ext: 'png' },
               ],
             },
             site
