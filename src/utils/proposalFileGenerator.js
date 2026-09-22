@@ -36,18 +36,31 @@ function sanitizePathSegment(value) {
   );
 }
 
+function parseCoord(val) {
+  if (val === undefined || val === null || val === '') return null;
+  const num = Number(val);
+  return Number.isFinite(num) ? num : null;
+}
+
 // Shared by every template's "With Location" map fetch — resolves client<->site coordinates to
-// a real Google route map image plus a short "19 mins • 6.8 km" label (or nulls when
-// coordinates are missing or the Google API call fails, in which case callers fall back to the
+// a real route map image plus a short "19 mins • 6.8 km" label (or nulls when
+// coordinates are missing, in which case callers fall back to the
 // usual "Insert your map image here" placeholder and skip the label entirely).
 async function fetchRouteMap(client, site) {
-  const hasCoords = site.latitude && site.longitude && client.latitude && client.longitude;
-  if (!hasCoords) return { mapImage: null, routeLabel: null };
+  const fLat = parseCoord(client.latitude);
+  const fLng = parseCoord(client.longitude);
+  const tLat = parseCoord(site.latitude);
+  const tLng = parseCoord(site.longitude);
+
+  if (fLat === null || fLng === null || tLat === null || tLng === null) {
+    return { mapImage: null, routeLabel: null };
+  }
+
   const result = await getRouteMapBuffer({
-    fromLat: client.latitude,
-    fromLng: client.longitude,
-    toLat: site.latitude,
-    toLng: site.longitude,
+    fromLat: fLat,
+    fromLng: fLng,
+    toLat: tLat,
+    toLng: tLng,
   });
   if (!result) return { mapImage: null, routeLabel: null };
   const routeLabel = [result.durationText, result.distanceText].filter(Boolean).join(' • ') || null;
@@ -224,10 +237,9 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
         // "Without Location": Group 4 (the rId3 box) must be removed outright, not just left
         // unfilled — it sits in document order after the now-widened Group 2, so leaving it in
         // place would render its own reference-file image on top of the enlarged photo. Group 18
-        // and Group 22 are the two decorative map-pin icons positioned inside the map box's area
-        // (x=13736435/14567387) — once the photo widens to cover that same area they'd float on
-        // top of the site photo, so they're removed alongside Group 4 in this mode.
-        removeGroupNames: withLocation ? [] : ['Group 4', 'Group 18', 'Group 22'],
+        // and Group 22 are the two decorative map-pin icons from the reference file — they are
+        // ALWAYS removed in both modes so they never render on top of the dynamic map image.
+        removeGroupNames: ['Group 18', 'Group 22', ...(withLocation ? [] : ['Group 4'])],
         clearImageRelId: withLocation && !mapImage ? 'rId3' : undefined,
         placeholderText:
           withLocation && !mapImage
@@ -508,6 +520,9 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
   }
 
   if (isAdinnPhotosOnly) {
+    const slideFiles = await tpl.getSlideFiles();
+    const staticFirstSlide = slideFiles[0];
+    const staticLastSlide = slideFiles[slideFiles.length - 1];
     // adinn-photos-only: reference slide1 is a city-divider template ("Madurai" placeholder +
     // logo), slide2 is a single site-photo template (two-run caption + one full-bleed photo).
     // Both are cloned as many times as needed, in the user's city/site selection order; none of
