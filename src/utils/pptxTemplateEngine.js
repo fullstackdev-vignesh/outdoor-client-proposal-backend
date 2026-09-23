@@ -40,6 +40,9 @@ function getImageDimensions(buffer, ext) {
 }
 
 // "object-fit: cover" style crop, expressed as OOXML <a:srcRect> insets (thousandths of a percent).
+// Used only for shapes that keep their box's exact size/position (no "contain" repositioning) —
+// crops the source image so it fills the box with no letterboxing, at the cost of trimming
+// whichever axis overhangs.
 function computeCoverFillRect(srcW, srcH, boxW, boxH) {
   if (!srcW || !srcH || !boxW || !boxH) return { l: 0, t: 0, r: 0, b: 0 };
   const srcAR = srcW / srcH;
@@ -53,6 +56,127 @@ function computeCoverFillRect(srcW, srcH, boxW, boxH) {
     return { l: 0, t: crop, r: 0, b: crop };
   }
   return { l: 0, t: 0, r: 0, b: 0 };
+}
+
+// Aspect-ratio preserving contain fit (no crop, no stretch). Fits full image in (maxW, maxH) area,
+// centered horizontally and vertically.
+function computeContainBox(srcW, srcH, areaX, areaY, maxW, maxH) {
+  if (!srcW || !srcH || !maxW || !maxH) {
+    return { offX: areaX, offY: areaY, extCx: maxW, extCy: maxH };
+  }
+  const srcAR = srcW / srcH;
+  const areaAR = maxW / maxH;
+  let fittedW, fittedH, fittedX, fittedY;
+
+  if (srcAR > areaAR) {
+    fittedW = maxW;
+    fittedH = Math.round(maxW / srcAR);
+    fittedX = areaX;
+    fittedY = areaY + Math.round((maxH - fittedH) / 2);
+  } else {
+    fittedH = maxH;
+    fittedW = Math.round(maxH * srcAR);
+    fittedX = areaX + Math.round((maxW - fittedW) / 2);
+    fittedY = areaY;
+  }
+
+  return { offX: fittedX, offY: fittedY, extCx: fittedW, extCy: fittedH };
+}
+
+// Gap kept between the route-info label ("24 mins • 6.8 km") and the map's own bottom edge, so
+// the label reads as floating just above the map's border instead of touching/overlapping it.
+const MAP_LABEL_MARGIN_EMU = 130000;
+
+// Box for the route-info label — sized/positioned off the map's actually-visible (fitted) rect,
+// with a small bottom margin so it never touches that rect's own bottom edge/border.
+function computeMapLabelBox(fittedRect) {
+  const labelHeight = Math.min(380000, fittedRect.extCy);
+  const margin = Math.min(MAP_LABEL_MARGIN_EMU, Math.max(fittedRect.extCy - labelHeight, 0));
+  return {
+    offX: fittedRect.offX,
+    offY: fittedRect.offY + fittedRect.extCy - labelHeight - margin,
+    extCx: fittedRect.extCx,
+    extCy: labelHeight,
+  };
+}
+
+// True when a shape's own visual outline is an (effectively) plain axis-aligned rectangle — a
+// real preset rectangle, or a "Freeform" custGeom whose path is nothing but its own bounding box
+// drawn as four straight edges (a common artifact of templates authored/exported from design
+// tools, where every plain rectangle becomes a custom path). Only shapes like this are safe to
+// resize/reposition for a "contain" fit: anything with an actual decorative cut/notch would
+// visibly distort if stretched to a new aspect ratio, since custGeom paths scale independently
+// per axis to fill whatever <a:ext> they're given.
+function isPlainRectangleShape(shapeBlock) {
+  if (/<a:prstGeom prst="rect"/.test(shapeBlock)) return true;
+  const pathMatch = shapeBlock.match(/<a:path w="(\d+)" h="(\d+)">([\s\S]*?)<\/a:path>/);
+  if (!pathMatch) return false;
+  const [, w, h, pathBody] = pathMatch;
+  const rectPathRe = new RegExp(
+    '^<a:moveTo><a:pt x="0" y="0"/></a:moveTo>' +
+      `<a:lnTo><a:pt x="${w}" y="0"/></a:lnTo>` +
+      `<a:lnTo><a:pt x="${w}" y="${h}"/></a:lnTo>` +
+      `<a:lnTo><a:pt x="0" y="${h}"/></a:lnTo>` +
+      '<a:close/>$'
+  );
+  return rectPathRe.test(pathBody);
+}
+
+// A shape nested inside a <p:grpSp> has its own <a:xfrm> expressed in that group's local
+// child-coordinate space (chOff/chExt), which the group's outer xfrm then scales/translates onto
+// the actual slide — so its raw off/ext numbers are *not* real slide-absolute EMUs whenever the
+// group applies any scaling. Resizing it as if they were would misplace/mis-size the image (and,
+// if the group scales X/Y unevenly, even "aspect ratio" computed from the raw numbers would be
+// wrong). Detected by counting <p:grpSp> open/close tags before the given index.
+function isInsideGroup(slideXml, index) {
+  const before = slideXml.slice(0, index);
+  const opens = (before.match(/<p:grpSp>/g) || []).length;
+  const closes = (before.match(/<\/p:grpSp>/g) || []).length;
+  return opens > closes;
+}
+
+// Locates the <p:pic> or plain-rectangle <p:sp> whose <a:blip> references relId and returns its
+// current <a:xfrm> box (offset + extent) plus enough info to splice a replacement in later.
+// Reading the box off the slide part itself (rather than trusting a value passed down from the
+// caller) means this always reflects the *final* position/size, even after an earlier mutation
+// (narrowing to make room for a map, widening to fill freed space, etc.) has already run. Returns
+// null (leaving the caller's existing cover/stretch behavior untouched) for anything not safely
+// fittable in place — decorative non-rectangular shapes, or shapes nested inside a group.
+function findPicXfrm(slideXml, relId, { allowGrouped = false } = {}) {
+  const blockRe = /<p:(pic|sp)>[\s\S]*?<\/p:\1>/g;
+  let match;
+  while ((match = blockRe.exec(slideXml))) {
+    if (!match[0].includes(`r:embed="${relId}"`)) continue;
+    if (!isPlainRectangleShape(match[0])) continue;
+    if (!allowGrouped && isInsideGroup(slideXml, match.index)) continue;
+    const xfrmRe = /<a:xfrm[^>]*><a:off x="(-?\d+)" y="(-?\d+)"\/><a:ext cx="(\d+)" cy="(\d+)"\/>/;
+    const xfrmMatch = match[0].match(xfrmRe);
+    if (!xfrmMatch) continue;
+    return {
+      blockIndex: match.index,
+      block: match[0],
+      xfrmTag: xfrmMatch[0],
+      offX: parseInt(xfrmMatch[1], 10),
+      offY: parseInt(xfrmMatch[2], 10),
+      cx: parseInt(xfrmMatch[3], 10),
+      cy: parseInt(xfrmMatch[4], 10),
+    };
+  }
+  return null;
+}
+
+// Resizes/repositions an existing <p:pic>'s own <a:xfrm> so `dims` (the image just placed inside
+// it) displays fully "contain"-fit within that pic's current box — no crop, no stretch, centered.
+// This is what lets two images placed side by side (a site photo + its location map) both show
+// completely instead of one/both being distort-stretched to exactly fill their box.
+function fitPicIntoBox(slideXml, relId, dims) {
+  if (!dims) return slideXml;
+  const found = findPicXfrm(slideXml, relId);
+  if (!found) return slideXml;
+  const fitted = computeContainBox(dims.width, dims.height, found.offX, found.offY, found.cx, found.cy);
+  const newXfrmTag = `<a:xfrm><a:off x="${fitted.offX}" y="${fitted.offY}"/><a:ext cx="${fitted.extCx}" cy="${fitted.extCy}"/>`;
+  const updatedBlock = found.block.replace(found.xfrmTag, newXfrmTag);
+  return slideXml.slice(0, found.blockIndex) + updatedBlock + slideXml.slice(found.blockIndex + found.block.length);
 }
 
 function removeRedHighlightShapes(slideXml) {
@@ -293,21 +417,33 @@ class PptxTemplate {
       slideXml = slideXml.replace(re, `$1${widthEMU}$2`);
     }
 
-    for (const { relId, buffer, ext, boxWidthEMU, boxHeightEMU } of images) {
+    for (const { relId, buffer, ext, boxWidthEMU, boxHeightEMU, fitContain } of images) {
       if (!buffer) continue;
       const newTarget = await this.addMediaFile(buffer, ext);
       relsXml = this.replaceRelTarget(relsXml, relId, newTarget);
 
       // <a:fillRect> insets shrink the visible image *within* the shape (leaving gaps) — the
       // correct "cover crop" element is <a:srcRect>, which crops the source image itself before
-      // the (gap-free) stretch-to-fill-shape happens.
+      // the (gap-free) stretch-to-fill-shape happens. Skipped (zero insets) only when "contain"
+      // repositioning below can actually run — findPicXfrm refuses shapes nested inside a
+      // <p:grpSp> (their raw off/ext aren't real slide-absolute EMUs) or non-rectangular shapes,
+      // so fitPicIntoBox silently no-ops for those; falling back to a real cover-crop there avoids
+      // leaving the image both uncropped AND unrepositioned, which would force-stretch/distort it.
       const dims = getImageDimensions(buffer, ext);
-      const rect = dims ? computeCoverFillRect(dims.width, dims.height, boxWidthEMU, boxHeightEMU) : { l: 0, t: 0, r: 0, b: 0 };
+      const canReposition = fitContain && dims && findPicXfrm(slideXml, relId) !== null;
+      const rect = !canReposition && dims ? computeCoverFillRect(dims.width, dims.height, boxWidthEMU, boxHeightEMU) : { l: 0, t: 0, r: 0, b: 0 };
       const blipStretchRe = new RegExp(`<a:blip r:embed="${relId}"\\/><a:stretch><a:fillRect[^/]*\\/><\\/a:stretch>`);
       slideXml = slideXml.replace(
         blipStretchRe,
         `<a:blip r:embed="${relId}"/><a:srcRect l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"/><a:stretch><a:fillRect/></a:stretch>`
       );
+
+      // "Contain" fit (full image, no crop, no stretch) — opt-in per image, used for the two-column
+      // site-photo + location-map layouts. Single full-bleed photos leave this off, keeping their
+      // existing cover/stretch look.
+      if (canReposition) {
+        slideXml = fitPicIntoBox(slideXml, relId, dims);
+      }
     }
 
     if (clearImageRelId) {
@@ -382,20 +518,31 @@ class PptxTemplate {
     // read/replaced, leaving the root group transform (and everything else) untouched.
     const picBlockRe = /<p:pic>[\s\S]*?<\/p:pic>/;
     const picBlockMatch = slideXml.match(picBlockRe);
-    const picXfrmRe = /(<a:xfrm><a:off x="(-?\d+)" y="(-?\d+)"\/><a:ext cx=")\d+(" cy="(\d+)"\/>)/;
+    const picXfrmRe = /<a:xfrm><a:off x="(-?\d+)" y="(-?\d+)"\/><a:ext cx="\d+" cy="(\d+)"\/>/;
     let offX = 675481;
     let offY = 551656;
     let cy = 6096000;
+    // The image's own aspect ratio (when known) drives a "contain" fit into the narrowed left
+    // box — full photo, no crop, no stretch — instead of simply forcing the box to
+    // leftBoxWidthEMU (which would distort the photo whenever its aspect doesn't match the box).
+    const imageDims = image && image.buffer ? getImageDimensions(image.buffer, image.ext) : null;
+    // Declared here (not just inside the `if` below) so the map's own contain-fit further down
+    // can target the photo's *actual* fitted height/offY instead of the box's raw (taller) cy —
+    // otherwise an uncropped photo (shorter than its box whenever its aspect doesn't match) and a
+    // map that fills its full box would visibly differ in height even though neither is cropped.
+    let leftFitted = { offX, offY, extCx: leftBoxWidthEMU, extCy: cy };
     if (picBlockMatch) {
       const picBlock = picBlockMatch[0];
       const xfrmMatch = picBlock.match(picXfrmRe);
       if (xfrmMatch) {
-        offX = parseInt(xfrmMatch[2], 10);
-        offY = parseInt(xfrmMatch[3], 10);
-        // Group 4 is the whole "\" cy=\"NNN\"/>\"" suffix (used below to splice the replacement
-        // back together) — the numeric height itself is group 5.
-        cy = parseInt(xfrmMatch[5], 10);
-        const updatedPicBlock = picBlock.replace(picXfrmRe, `$1${leftBoxWidthEMU}$4`);
+        offX = parseInt(xfrmMatch[1], 10);
+        offY = parseInt(xfrmMatch[2], 10);
+        cy = parseInt(xfrmMatch[3], 10);
+        leftFitted = imageDims
+          ? computeContainBox(imageDims.width, imageDims.height, offX, offY, leftBoxWidthEMU, cy)
+          : { offX, offY, extCx: leftBoxWidthEMU, extCy: cy };
+        const newXfrmTag = `<a:xfrm><a:off x="${leftFitted.offX}" y="${leftFitted.offY}"/><a:ext cx="${leftFitted.extCx}" cy="${leftFitted.extCy}"/>`;
+        const updatedPicBlock = picBlock.replace(xfrmMatch[0], newXfrmTag);
         slideXml = slideXml.slice(0, picBlockMatch.index) + updatedPicBlock + slideXml.slice(picBlockMatch.index + picBlock.length);
       }
     }
@@ -404,13 +551,16 @@ class PptxTemplate {
       const newTarget = await this.addMediaFile(image.buffer, image.ext);
       relsXml = this.replaceRelTarget(relsXml, relId, newTarget);
 
-      const dims = getImageDimensions(image.buffer, image.ext);
-      const rect = dims ? computeCoverFillRect(dims.width, dims.height, leftBoxWidthEMU, cy) : { l: 0, t: 0, r: 0, b: 0 };
+      // No crop here — the pic's own xfrm was just resized/repositioned above for a "contain" fit,
+      // so the full (uncropped) photo is what that box is now sized to show.
+      const rect = { l: 0, t: 0, r: 0, b: 0 };
       const target = `<a:blip r:embed="${relId}" cstate="print"><a:lum/></a:blip><a:srcRect/><a:stretch><a:fillRect/></a:stretch>`;
       const replacement = `<a:blip r:embed="${relId}" cstate="print"><a:lum/></a:blip><a:srcRect l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"/><a:stretch><a:fillRect/></a:stretch>`;
       slideXml = slideXml.replace(target, replacement);
     }
 
+    // rightOffX is derived from the box's nominal (not fitted) width so the gap to the map box
+    // stays fixed regardless of the photo's own aspect ratio/letterboxing.
     const rightOffX = offX + leftBoxWidthEMU + gapEMU;
 
     if (mapImage && mapImage.buffer) {
@@ -421,20 +571,29 @@ class PptxTemplate {
         `<Relationship Id="${newRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="${mapTarget}"/></Relationships>`
       );
       const dims = getImageDimensions(mapImage.buffer, mapImage.ext);
-      const rect = dims ? computeCoverFillRect(dims.width, dims.height, rightBoxWidthEMU, cy) : { l: 0, t: 0, r: 0, b: 0 };
+      // No crop — the pic is placed below at its "contain"-fitted size (mapFitted), so the full
+      // map (route + pins) is what that box shows. Sized/positioned against the photo's own
+      // fitted height (leftFitted), not the raw box cy, so the two end up the same height.
+      const rect = { l: 0, t: 0, r: 0, b: 0 };
+      const mapFitted = dims
+        ? computeContainBox(dims.width, dims.height, rightOffX, leftFitted.offY, rightBoxWidthEMU, leftFitted.extCy)
+        : { offX: rightOffX, offY: leftFitted.offY, extCx: rightBoxWidthEMU, extCy: leftFitted.extCy };
       const shapeId = 9500 + this._nextSlideIndex;
       const mapPic =
         `<p:pic><p:nvPicPr><p:cNvPr id="${shapeId}" name="Map Picture"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>` +
         `<p:blipFill><a:blip r:embed="${newRelId}"/><a:srcRect l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>` +
-        `<p:spPr bwMode="white"><a:xfrm><a:off x="${rightOffX}" y="${offY}"/><a:ext cx="${rightBoxWidthEMU}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
+        `<p:spPr bwMode="white"><a:xfrm><a:off x="${mapFitted.offX}" y="${mapFitted.offY}"/><a:ext cx="${mapFitted.extCx}" cy="${mapFitted.extCy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
       slideXml = slideXml.replace('</p:spTree>', `${mapPic}</p:spTree>`);
 
       if (mapLabel) {
-        const labelHeight = Math.min(380000, cy);
+        // Anchored to the fitted map rect (not the raw box) so the label sits over the bottom
+        // edge of the actual visible map image, not an empty letterbox gap beside/below it —
+        // with a small margin so it floats just above that edge instead of touching it.
+        const labelBox = computeMapLabelBox(mapFitted);
         const labelShapeId = 9550 + this._nextSlideIndex;
         const labelSp =
           `<p:sp><p:nvSpPr><p:cNvPr name="Route Info" id="${labelShapeId}"/><p:cNvSpPr txBox="true"/><p:nvPr/></p:nvSpPr>` +
-          `<p:spPr><a:xfrm><a:off x="${rightOffX}" y="${offY + cy - labelHeight}"/><a:ext cx="${rightBoxWidthEMU}" cy="${labelHeight}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+          `<p:spPr><a:xfrm><a:off x="${labelBox.offX}" y="${labelBox.offY}"/><a:ext cx="${labelBox.extCx}" cy="${labelBox.extCy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
           `<a:solidFill><a:srgbClr val="FFFFFF"><a:alpha val="85000"/></a:srgbClr></a:solidFill><a:ln><a:noFill/></a:ln></p:spPr>` +
           `<p:txBody><a:bodyPr anchor="ctr" wrap="square"><a:noAutofit/></a:bodyPr><a:lstStyle/><a:p><a:pPr algn="ctr"/>` +
           `<a:r><a:rPr lang="en-US" sz="1400" b="1"><a:solidFill><a:srgbClr val="C2221E"/></a:solidFill></a:rPr><a:t>${xmlEscape(mapLabel)}</a:t></a:r>` +
@@ -465,9 +624,14 @@ class PptxTemplate {
   // <p:sp> is the caption — Jagran-template-one's caption is a placeholder shape (p:ph type=
   // "body"), publicis-ooh-template's is a plain manually-inserted textbox (p:cNvSpPr txBox="1")
   // — so it defaults to the former to keep existing Jagran-template-one behavior unchanged.
+  // `fitContain`: skip the cover-crop below entirely (zero insets) — used by callers that are
+  // about to reposition this same pic with a separate fitImageContain() call (full image, no
+  // crop, letterboxed instead). Applying both would crop the image AND THEN resize/reposition
+  // the shape using the image's original (pre-crop) aspect ratio, stretching the already-cropped
+  // remainder to fill a box sized for the uncropped photo — a doubly-wrong result.
   async cloneCaptionPhotoSlide(
     templateBaseName,
-    { captionText, image, relId = 'rId3', boxWidthEMU, boxHeightEMU, captionAnchorMarker = '<p:ph type="body"[^>]*/>' } = {}
+    { captionText, image, relId = 'rId3', boxWidthEMU, boxHeightEMU, captionAnchorMarker = '<p:ph type="body"[^>]*/>', fitContain = false } = {}
   ) {
     const slidePath = `ppt/slides/${templateBaseName}.xml`;
     const relsPath = `ppt/slides/_rels/${templateBaseName}.xml.rels`;
@@ -494,8 +658,13 @@ class PptxTemplate {
       const newTarget = await this.addMediaFile(image.buffer, image.ext);
       relsXml = this.replaceRelTarget(relsXml, relId, newTarget);
 
+      // Mirrors cloneAdinnSiteSlide's images loop: only skip the crop when the caller's later
+      // fitImageContain() call will actually be able to reposition this shape (not grouped, a
+      // plain rectangle) — otherwise apply a real cover-crop now, since that follow-up call will
+      // find the same shape unrepositionable and become a no-op.
       const dims = getImageDimensions(image.buffer, image.ext);
-      const rect = dims ? computeCoverFillRect(dims.width, dims.height, boxWidthEMU, boxHeightEMU) : { l: 0, t: 0, r: 0, b: 0 };
+      const canReposition = fitContain && dims && findPicXfrm(slideXml, relId) !== null;
+      const rect = !canReposition && dims ? computeCoverFillRect(dims.width, dims.height, boxWidthEMU, boxHeightEMU) : { l: 0, t: 0, r: 0, b: 0 };
 
       // The blip element is self-closing in some templates (Jagran-template-one) but has child
       // elements (e.g. a useLocalDpi hint) in others (publicis-ooh-template), so both forms of
@@ -623,6 +792,7 @@ class PptxTemplate {
   async insertImageOrPlaceholder(slidePath, relsPath, { offX, offY, extCx, extCy, buffer, ext, placeholderText = 'Insert your map image here' }) {
     let slideXml = await this.readText(slidePath);
     let relsXml = await this.readText(relsPath);
+    let fittedRect = { offX, offY, extCx, extCy };
 
     if (buffer) {
       const target = await this.addMediaFile(buffer, ext);
@@ -632,12 +802,15 @@ class PptxTemplate {
         `<Relationship Id="${newRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="${target}"/></Relationships>`
       );
       const dims = getImageDimensions(buffer, ext);
-      const rect = dims ? computeCoverFillRect(dims.width, dims.height, extCx, extCy) : { l: 0, t: 0, r: 0, b: 0 };
+      // No crop — the pic below is placed at its "contain"-fitted size (fittedRect), so the
+      // complete route/pins/labels stay visible instead of being cropped or distort-stretched.
+      const rect = { l: 0, t: 0, r: 0, b: 0 };
+      fittedRect = dims ? computeContainBox(dims.width, dims.height, offX, offY, extCx, extCy) : fittedRect;
       const shapeId = 9700 + this._nextSlideIndex;
       const pic =
         `<p:pic><p:nvPicPr><p:cNvPr id="${shapeId}" name="Map Picture"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>` +
         `<p:blipFill><a:blip r:embed="${newRelId}"/><a:srcRect l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>` +
-        `<p:spPr bwMode="white"><a:xfrm><a:off x="${offX}" y="${offY}"/><a:ext cx="${extCx}" cy="${extCy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
+        `<p:spPr bwMode="white"><a:xfrm><a:off x="${fittedRect.offX}" y="${fittedRect.offY}"/><a:ext cx="${fittedRect.extCx}" cy="${fittedRect.extCy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
       slideXml = slideXml.replace('</p:spTree>', `${pic}</p:spTree>`);
     } else {
       const shapeId = 9800 + this._nextSlideIndex;
@@ -653,20 +826,39 @@ class PptxTemplate {
 
     this.writeText(slidePath, slideXml);
     this.writeText(relsPath, relsXml);
+    return fittedRect;
   }
 
-  // Draws a small "19 mins • 6.8 km" style route-info strip at the bottom edge of a map box
-  // (real Google route maps only — never shown over the "Insert your map image here"
-  // placeholder). No-op when `text` is empty/falsy, so callers can pass it unconditionally.
+  // Resizes/repositions an existing <p:pic>'s own <a:xfrm> so `buffer`'s image displays fully
+  // "contain"-fit (no crop, no stretch, centered) within its current box on an already-cloned
+  // slide part. Used where the box's *final* size is only known after a separate mutation (e.g.
+  // narrowing a photo box to make room for a map) has already run — reading the box directly off
+  // the slide, rather than needing that final size threaded back through, keeps the two steps
+  // independent. No-op when there's no new image or the box/blip can't be repositioned (nested
+  // inside a group, or non-rectangular) — callers that pass `fitContain` through to the earlier
+  // clone method (which checks the identical condition on this same not-yet-touched shape) will
+  // already have applied a real cover-crop instead in that case, so this has nothing left to do.
+  async fitImageContain(slidePath, relId, buffer, ext) {
+    if (!buffer) return;
+    const dims = getImageDimensions(buffer, ext);
+    if (!dims) return;
+    let slideXml = await this.readText(slidePath);
+    if (!findPicXfrm(slideXml, relId)) return;
+    slideXml = fitPicIntoBox(slideXml, relId, dims);
+    this.writeText(slidePath, slideXml);
+  }
+
+  // Draws a small "19 mins • 6.8 km" style route-info strip floating just above the bottom edge
+  // of a map box (real Google route maps only — never shown over the "Insert your map image
+  // here" placeholder). No-op when `text` is empty/falsy, so callers can pass it unconditionally.
   async insertMapLabel(slidePath, { offX, offY, extCx, extCy, text }) {
     if (!text) return;
     let slideXml = await this.readText(slidePath);
     const shapeId = 9900 + this._nextSlideIndex;
-    const labelHeight = Math.min(380000, extCy);
-    const labelOffY = offY + extCy - labelHeight;
+    const labelBox = computeMapLabelBox({ offX, offY, extCx, extCy });
     const sp =
       `<p:sp><p:nvSpPr><p:cNvPr name="Route Info" id="${shapeId}"/><p:cNvSpPr txBox="true"/><p:nvPr/></p:nvSpPr>` +
-      `<p:spPr><a:xfrm><a:off x="${offX}" y="${labelOffY}"/><a:ext cx="${extCx}" cy="${labelHeight}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+      `<p:spPr><a:xfrm><a:off x="${labelBox.offX}" y="${labelBox.offY}"/><a:ext cx="${labelBox.extCx}" cy="${labelBox.extCy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
       `<a:solidFill><a:srgbClr val="FFFFFF"><a:alpha val="85000"/></a:srgbClr></a:solidFill><a:ln><a:noFill/></a:ln></p:spPr>` +
       `<p:txBody><a:bodyPr anchor="ctr" wrap="square"><a:noAutofit/></a:bodyPr><a:lstStyle/><a:p><a:pPr algn="ctr"/>` +
       `<a:r><a:rPr lang="en-US" sz="1400" b="1"><a:solidFill><a:srgbClr val="C2221E"/></a:solidFill></a:rPr><a:t>${xmlEscape(text)}</a:t></a:r>` +
@@ -739,4 +931,4 @@ class PptxTemplate {
   }
 }
 
-module.exports = { PptxTemplate, extOf };
+module.exports = { PptxTemplate, extOf, computeContainBox, getImageDimensions };
