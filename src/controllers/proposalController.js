@@ -60,11 +60,14 @@ const createProposal = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error('One or more selected sites could not be found');
   }
-  const unavailable = siteDocs.filter((s) => s.mediaStatus !== 'available');
-  if (unavailable.length > 0) {
+  // Proposal creation is only for preparing a proposal, not confirming a booking, so a site
+  // being already `booked` (by someone else, for a different date range) must not block it from
+  // being proposed too — only `blocked` sites (explicitly taken out of circulation) are rejected.
+  const blocked = siteDocs.filter((s) => s.mediaStatus === 'blocked');
+  if (blocked.length > 0) {
     res.status(400);
     throw new Error(
-      `The following media cannot be added to a proposal: ${unavailable.map((s) => s.mediaName).join(', ')}`
+      `The following media cannot be added to a proposal: ${blocked.map((s) => s.mediaName).join(', ')}`
     );
   }
 
@@ -137,7 +140,13 @@ const generatePpt = asyncHandler(async (req, res) => {
   // exact behavior. Only 'without' triggers the location-stripped generation.
   const locationMode = req.body?.locationMode === 'without' ? 'without' : 'with';
   try {
-    proposal.generatedPptUrl = await generateProposalPpt(proposal, { locationMode });
+    const url = await generateProposalPpt(proposal, { locationMode });
+    proposal.generatedPptUrl = url;
+    if (locationMode === 'without') {
+      proposal.generatedPptWithoutLocationUrl = url;
+    } else {
+      proposal.generatedPptWithLocationUrl = url;
+    }
     proposal.status = proposal.generatedExcelUrl ? 'completed' : 'generated';
     await proposal.save();
     res.json(proposal);
