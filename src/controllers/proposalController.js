@@ -6,12 +6,31 @@ const { generateProposalPpt, generateProposalExcel } = require('../utils/proposa
 
 const genProposalId = () => `PR-${Date.now().toString(36).toUpperCase()}`;
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 const getProposals = asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(100, Number(req.query.limit) || 20);
   const filter = {};
   if (req.query.status) filter.status = req.query.status;
-  if (req.query.proposalId) filter.proposalId = new RegExp(req.query.proposalId, 'i');
+  if (req.query.proposalId) filter.proposalId = new RegExp(escapeRegex(req.query.proposalId), 'i');
+  if (req.query.client) filter.client = req.query.client;
+  if (req.query.fromDate || req.query.toDate) {
+    // createdAt is stored via nowIST() (Date.now() + IST offset baked into its own UTC digits —
+    // see Proposal.js), so a plain "YYYY-MM-DD" from a date input is already the right calendar
+    // day when read back as UTC midnight-to-midnight, matching how the rest of the app (e.g.
+    // booking date-range comparisons) already treats these values as calendar-date-only.
+    filter.createdAt = {};
+    if (req.query.fromDate) filter.createdAt.$gte = new Date(`${req.query.fromDate}T00:00:00.000Z`);
+    if (req.query.toDate) filter.createdAt.$lte = new Date(`${req.query.toDate}T23:59:59.999Z`);
+  }
+  if (req.query.search) {
+    const searchRe = new RegExp(escapeRegex(req.query.search), 'i');
+    const matchingClientIds = await Client.find({ name: searchRe }).distinct('_id');
+    filter.$or = [{ proposalId: searchRe }, { client: { $in: matchingClientIds } }];
+  }
 
   const [items, total] = await Promise.all([
     Proposal.find(filter)
