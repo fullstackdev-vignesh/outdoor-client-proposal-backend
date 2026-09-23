@@ -180,9 +180,13 @@ function fitPicIntoBox(slideXml, relId, dims) {
 }
 
 function removeRedHighlightShapes(slideXml) {
-  const spRegex = /<p:sp\b[^>]*>[\s\S]*?<\/p:sp>/g;
+  const spRegex = /<p:(sp|cxnSp)\b[^>]*>[\s\S]*?<\/p:\1>/g;
   return slideXml.replace(spRegex, (match) => {
-    if (/srgbClr\s+val="(?:FF0000|C00000|ED1C24|FF0022|990000)"/i.test(match)) {
+    if (
+      /srgbClr\s+val="(?:FF0000|C00000|ED1C24|FF0022|990000)"/i.test(match) ||
+      /prst="downArrow"/i.test(match) ||
+      /name="Arrow:\s*Down/i.test(match)
+    ) {
       return '';
     }
     return match;
@@ -390,6 +394,8 @@ class PptxTemplate {
     let slideXml = await this.readText(slidePath);
     let relsXml = await this.readText(relsPath);
 
+    slideXml = removeRedHighlightShapes(slideXml);
+
     for (const groupName of removeGroupNames) {
       const groupRe = /<p:grpSp>(?:(?!<\/p:grpSp>)[\s\S])*?<\/p:grpSp>/g;
       slideXml = slideXml.replace(groupRe, (block) => (block.includes(`name="${groupName}"`) ? '' : block));
@@ -477,6 +483,8 @@ class PptxTemplate {
     let slideXml = await this.readText(slidePath);
     let relsXml = await this.readText(relsPath);
 
+    slideXml = removeRedHighlightShapes(slideXml);
+
     slideXml = slideXml.replace('<a:t>Yanaikkal junction</a:t>', `<a:t>${xmlEscape(locationText)}</a:t>`);
     slideXml = slideXml.replace('<a:t>  20x20</a:t>', `<a:t>${xmlEscape(sizeText)}</a:t>`);
 
@@ -508,6 +516,8 @@ class PptxTemplate {
 
     let slideXml = await this.readText(slidePath);
     let relsXml = await this.readText(relsPath);
+
+    slideXml = removeRedHighlightShapes(slideXml);
 
     slideXml = slideXml.replace('<a:t>Yanaikkal junction</a:t>', `<a:t>${xmlEscape(locationText)}</a:t>`);
     slideXml = slideXml.replace('<a:t>  20x20</a:t>', `<a:t>${xmlEscape(sizeText)}</a:t>`);
@@ -638,6 +648,8 @@ class PptxTemplate {
 
     let slideXml = await this.readText(slidePath);
     let relsXml = await this.readText(relsPath);
+
+    slideXml = removeRedHighlightShapes(slideXml);
 
     const captionShapeRe = new RegExp(
       `(<p:sp>(?:(?!<\\/p:sp>)[\\s\\S])*?${captionAnchorMarker}[\\s\\S]*?<p:txBody>)([\\s\\S]*?)(<\\/p:txBody>[\\s\\S]*?<\\/p:sp>)`
