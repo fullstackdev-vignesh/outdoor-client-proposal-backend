@@ -60,46 +60,53 @@ async function recordStatusPeriod({ site, previousStatus, source, userId }) {
 // updates its existing row in place instead of creating a new one.
 async function syncBookingTimelineRecords(site, userId, source) {
   const now = nowIST();
-  const bookings = (site.bookings || []).filter((b) => b.status !== 'cancelled');
+  const bookings = site.bookings || [];
   for (const b of bookings) {
     let customerName = b.customerName;
     if (!customerName && b.client) {
       const client = await Client.findById(b.client).select('name');
       customerName = client?.name;
     }
-    await InventoryHistory.findOneAndUpdate(
-      { site: site._id, bookingId: b.bookingId },
-      {
-        $set: {
-          site: site._id,
-          bookingId: b.bookingId,
-          mediaId: site.mediaId,
-          mediaType: site.mediaType,
-          state: site.state,
-          city: site.city,
-          mediaImage: site.mediaImage,
-          siteOwner: site.siteOwner,
-          status: 'booked',
-          isActive: site.isActive,
-          effectiveFrom: new Date(b.startDate),
-          effectiveTo: new Date(b.endDate),
-          changedAt: now,
-          changedBy: userId,
-          source,
-          bookingSnapshot: {
-            customerType: b.customerType,
-            client: b.client,
-            customerName,
-            startDate: b.startDate,
-            endDate: b.endDate,
-            durationDays: b.durationDays,
-            monthlyTotalCost: b.monthlyTotalCost,
-            amount: b.amount,
-          },
-        },
+    const isCancelled = b.status === 'cancelled';
+    const update = {
+      site: site._id,
+      bookingId: b.bookingId,
+      mediaId: site.mediaId,
+      mediaType: site.mediaType,
+      state: site.state,
+      city: site.city,
+      mediaImage: site.mediaImage,
+      siteOwner: site.siteOwner,
+      // Cancelling a booking never erases its own Timeline row — it just relabels it so the
+      // original "Booked Period" (bookingSnapshot below) stays visible alongside why/when/by
+      // whom it was cancelled.
+      status: isCancelled ? 'cancelled' : 'booked',
+      isActive: site.isActive,
+      effectiveFrom: new Date(b.startDate),
+      effectiveTo: new Date(b.endDate),
+      changedAt: now,
+      changedBy: userId,
+      source,
+      bookingSnapshot: {
+        customerType: b.customerType,
+        client: b.client,
+        customerName,
+        startDate: b.startDate,
+        endDate: b.endDate,
+        durationDays: b.durationDays,
+        monthlyTotalCost: b.monthlyTotalCost,
+        amount: b.amount,
       },
-      { upsert: true }
-    );
+    };
+    if (isCancelled) {
+      update.cancellationSnapshot = {
+        reason: b.cancellationReason,
+        cancelledAt: b.cancelledAt,
+        cancelledByName: b.cancelledByName,
+        cancelledByRole: b.cancelledByRole,
+      };
+    }
+    await InventoryHistory.findOneAndUpdate({ site: site._id, bookingId: b.bookingId }, { $set: update }, { upsert: true });
   }
 }
 

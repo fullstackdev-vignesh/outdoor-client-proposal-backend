@@ -9,6 +9,7 @@ const {
   updateSite,
   deleteSite,
   changeStatus,
+  cancelBooking,
   bulkChangeStatus,
   bulkImport,
   uploadImage,
@@ -43,6 +44,7 @@ router.post('/bulk-import', authorize('admin', 'tl'), bulkImport);
 router.patch('/bulk-status', authorize('admin', 'tl'), bulkChangeStatus);
 router.put('/:id', authorize('admin', 'tl'), upload.single('mediaImage'), updateSite);
 router.patch('/:id/status', authorize('admin', 'tl'), changeStatus);
+router.patch('/:id/bookings/:bookingId/cancel', authorize('admin', 'tl'), cancelBooking);
 router.delete('/:id', authorize('admin', 'tl'), deleteSite);
 
 module.exports = router;

@@ -41,6 +41,13 @@ const bookingRecordSchema = new mongoose.Schema(
     updatedAt: { type: Date, default: nowIST },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    // Cancellation audit trail — set only when status is flipped to 'cancelled'. The booking
+    // record itself is never deleted so Timeline/history can keep showing what was booked.
+    cancellationReason: String,
+    cancelledAt: Date,
+    cancelledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    cancelledByName: String,
+    cancelledByRole: String,
   },
   { _id: false }
 );

@@ -12,7 +12,7 @@ const inventoryHistorySchema = new mongoose.Schema({
   mediaImage: String,
   siteOwner: String,
 
-  status: { type: String, enum: ['available', 'booked', 'blocked'], required: true, index: true },
+  status: { type: String, enum: ['available', 'booked', 'blocked', 'cancelled'], required: true, index: true },
   previousStatus: { type: String, enum: ['available', 'booked', 'blocked', null], default: null },
   isActive: { type: Boolean, default: true },
 
@@ -44,6 +44,14 @@ const inventoryHistorySchema = new mongoose.Schema({
     reason: String,
     notes: String,
     blockedDate: Date,
+  },
+  // Set only on the row for a booking that was cancelled — keeps `bookingSnapshot`'s original
+  // dates intact (still visible as the "Booked Period") alongside why/when/by-whom it ended.
+  cancellationSnapshot: {
+    reason: String,
+    cancelledAt: Date,
+    cancelledByName: String,
+    cancelledByRole: String,
   },
 });
 

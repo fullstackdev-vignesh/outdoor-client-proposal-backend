@@ -82,6 +82,39 @@ async function logBookingChanges(siteId, beforeBookings, afterBookings, userId, 
   if (entries.length) await SiteHistory.insertMany(entries);
 }
 
+// Marks a single booking record cancelled in place (never removes it — Timeline/history need
+// the original booking to still exist). Caller is responsible for site.markModified('bookings'),
+// resolveSiteStatus(site) and site.save() afterwards.
+function applyBookingCancellation(booking, reason, user) {
+  booking.status = 'cancelled';
+  booking.cancellationReason = reason;
+  booking.cancelledAt = nowIST();
+  booking.cancelledBy = user._id;
+  booking.cancelledByName = user.name;
+  booking.cancelledByRole = user.role;
+}
+
+// One explicit, readable SiteHistory row for a cancellation — deliberately not run through
+// logBookingChanges' generic field-diff format, since "Booking Cancelled" is a business event,
+// not a plain old-value → new-value edit.
+async function logBookingCancellation(siteId, booking, userId, changedAt) {
+  const ts = changedAt || nowIST();
+  const cancelledByLabel = booking.cancelledByName
+    ? `${booking.cancelledByName}${booking.cancelledByRole ? ` (${booking.cancelledByRole.toUpperCase()})` : ''}`
+    : '';
+  const newValue = [
+    `Booking: ${formatDateLabel(booking.startDate)} → ${formatDateLabel(booking.endDate)}`,
+    `Reason: ${booking.cancellationReason}`,
+    cancelledByLabel && `Cancelled By: ${cancelledByLabel}`,
+    `Cancelled At: ${formatIST(booking.cancelledAt)}`,
+  ]
+    .filter(Boolean)
+    .join(' | ');
+  await SiteHistory.insertMany([
+    { site: siteId, field: 'Booking Cancelled', oldValue: null, newValue, changedBy: userId, changedAt: ts },
+  ]);
+}
+
 const buildFilter = (query) => {
   const filter = {};
   if (query.search) {
@@ -459,7 +492,7 @@ const changeStatus = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error('Site not found');
   }
-  const { mediaStatus, blockReason, blockNotes, bookingInfo, source } = req.body;
+  const { mediaStatus, blockReason, blockNotes, bookingInfo, source, cancellationReason, reason } = req.body;
   const before = site.toObject();
   const beforeBookings = before.bookings || [];
   const beforeStatus = before.mediaStatus;
@@ -469,6 +502,8 @@ const changeStatus = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error('Invalid media status');
   }
+
+  let cancelledBooking = null;
 
   if (mediaStatus === 'blocked') {
     if (!blockReason) {
@@ -486,24 +521,89 @@ const changeStatus = asyncHandler(async (req, res) => {
         res.status(400);
         throw err;
       }
+    } else if (mediaStatus === 'available' && beforeStatus === 'booked') {
+      // Going straight from Booked to Available is really "cancel the booking that's currently
+      // making this site Booked" — never a silent status flip. Require and record a reason,
+      // and only cancel the ONE booking driving today's live status (not every booking).
+      const cancelReason = (cancellationReason || reason || '').trim();
+      if (!cancelReason) {
+        res.status(400);
+        throw new Error('Cancellation reason is required to change from Booked to Available');
+      }
+      const activeId = before.bookingInfo?.bookingId;
+      const activeBooking = activeId ? (site.bookings || []).find((b) => b.bookingId === activeId) : null;
+      if (activeBooking && activeBooking.status !== 'cancelled') {
+        applyBookingCancellation(activeBooking, cancelReason, req.user);
+        site.markModified('bookings');
+        cancelledBooking = activeBooking;
+      }
     }
-    // Live status/bookingInfo are always recomputed from the bookings array against
-    // today's date, not taken at face value from the requested `mediaStatus`.
+    // Live status/bookingInfo are always recomputed from the (remaining valid) bookings array
+    // against today's date, not taken at face value from the requested `mediaStatus` — so an
+    // Upcoming booking elsewhere in the array keeps the site Booked even after this cancellation.
     resolveSiteStatus(site);
   }
 
   await site.save();
 
   const statusChanged = beforeStatus !== site.mediaStatus || beforeBookingId !== site.bookingInfo?.bookingId;
+  const resolvedSource = source === 'inventory' ? 'inventory' : 'sites';
   if (statusChanged) {
     // `source` still labels the Timeline entry "via Sites"/"via Inventory" — it no longer
     // decides which timestamp bumps (that's fully data-driven in the Site model now).
-    await recordStatusPeriod({ site, previousStatus: beforeStatus, source: source === 'inventory' ? 'inventory' : 'sites', userId: req.user._id });
+    await recordStatusPeriod({ site, previousStatus: beforeStatus, source: resolvedSource, userId: req.user._id });
   }
-  await syncBookingTimelineRecords(site, req.user._id, source === 'inventory' ? 'inventory' : 'sites');
+  await syncBookingTimelineRecords(site, req.user._id, resolvedSource);
   const changedAt = nowIST();
   await logFieldChanges(site._id, before, site.toObject(), req.user._id, changedAt);
   await logBookingChanges(site._id, beforeBookings, site.bookings, req.user._id, changedAt);
+  if (cancelledBooking) {
+    await logBookingCancellation(site._id, cancelledBooking, req.user._id, changedAt);
+  }
+  res.json({ ...site.toObject(), mediaCode: site.mediaId });
+});
+
+// Individual booking cancellation from `/sites` → Edit Site → Booking Details (one booking at
+// a time, identified by bookingId — distinct from changeStatus's whole-site mediaStatus flow).
+const cancelBooking = asyncHandler(async (req, res) => {
+  const site = await Site.findById(req.params.id);
+  if (!site) {
+    res.status(404);
+    throw new Error('Site not found');
+  }
+  const booking = (site.bookings || []).find((b) => b.bookingId === req.params.bookingId);
+  if (!booking) {
+    res.status(404);
+    throw new Error('Booking not found');
+  }
+  if (booking.status === 'cancelled') {
+    res.status(400);
+    throw new Error('This booking is already cancelled');
+  }
+  const cancelReason = (req.body.reason || '').trim();
+  if (!cancelReason) {
+    res.status(400);
+    throw new Error('Cancellation reason is required');
+  }
+
+  const beforeStatus = site.mediaStatus;
+  const beforeBookingId = site.bookingInfo?.bookingId;
+
+  applyBookingCancellation(booking, cancelReason, req.user);
+  site.markModified('bookings');
+  // Remaining valid bookings (e.g. an Upcoming one) decide the site's status next — cancelling
+  // one booking never blindly sets the site to Available.
+  resolveSiteStatus(site);
+  await site.save();
+
+  const statusChanged = beforeStatus !== site.mediaStatus || beforeBookingId !== site.bookingInfo?.bookingId;
+  const resolvedSource = req.body.source === 'inventory' ? 'inventory' : 'sites';
+  if (statusChanged) {
+    await recordStatusPeriod({ site, previousStatus: beforeStatus, source: resolvedSource, userId: req.user._id });
+  }
+  await syncBookingTimelineRecords(site, req.user._id, resolvedSource);
+  await logBookingCancellation(site._id, booking, req.user._id, nowIST());
+
   res.json({ ...site.toObject(), mediaCode: site.mediaId });
 });
 
@@ -917,6 +1017,7 @@ module.exports = {
   updateSite,
   deleteSite,
   changeStatus,
+  cancelBooking,
   bulkChangeStatus,
   bulkImport,
   uploadImage,
