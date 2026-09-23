@@ -148,7 +148,7 @@ const getSites = asyncHandler(async (req, res) => {
 
   const [items, total] = await Promise.all([
     Site.find(filter)
-      .sort({ createdAt: -1 })
+      .sort({ updatedAt: -1, _id: 1 })
       .skip((page - 1) * limit)
       .limit(limit),
     Site.countDocuments(filter),
@@ -163,7 +163,7 @@ const getAvailableSites = asyncHandler(async (req, res) => {
   const limit = Math.min(100, Number(req.query.limit) || 20);
 
   const [items, total] = await Promise.all([
-    Site.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit),
+    Site.find(filter).sort({ updatedAt: -1, _id: 1 }).skip((page - 1) * limit).limit(limit),
     Site.countDocuments(filter),
   ]);
 
