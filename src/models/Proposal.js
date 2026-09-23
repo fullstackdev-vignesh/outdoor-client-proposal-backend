@@ -19,7 +19,13 @@ const proposalSchema = new mongoose.Schema(
       enum: ['draft', 'generated', 'completed'],
       default: 'draft',
     },
+    // generatedPptUrl always holds the MOST RECENT generation regardless of mode (kept for
+    // backward compatibility with any existing caller that only reads this one field); the two
+    // mode-specific fields below let the UI offer separate persistent "Download" links for each
+    // mode without one regenerate overwriting the other's URL.
     generatedPptUrl: String,
+    generatedPptWithLocationUrl: String,
+    generatedPptWithoutLocationUrl: String,
     generatedExcelUrl: String,
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdAt: { type: Date, default: nowIST },
