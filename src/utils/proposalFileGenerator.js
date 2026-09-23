@@ -612,7 +612,11 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
           // nominal box height, keeping the map's own contain-fit from adding its own letterbox.
           const PHOTO_MAP_GAP = 100000;
           const HALF_WIDTH = Math.floor((9448801 - PHOTO_MAP_GAP) / 2);
-          const { mapImage, routeLabel } = await fetchRouteMap(client, site, { extCx: HALF_WIDTH, extCy: 6096000 });
+          const photoDims = siteImage?.buffer ? getImageDimensions(siteImage.buffer, siteImage.ext) : null;
+          const photoFitted = photoDims
+            ? computeContainBox(photoDims.width, photoDims.height, 675481, 551656, HALF_WIDTH, 6096000)
+            : { extCy: 6096000 };
+          const { mapImage, routeLabel } = await fetchRouteMap(client, site, { extCx: HALF_WIDTH, extCy: photoFitted.extCy });
           photoBase = await tpl.clonePhotoWithMapSlide('slide3', {
             locationText,
             sizeText,
@@ -753,11 +757,16 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
             // of the box's nominal (taller) height — otherwise an uncropped landscape photo (which
             // ends up shorter than its box) and a map that fills its full box would visibly differ
             // in height even though neither is cropped.
+            const photoDims = siteImage?.buffer ? getImageDimensions(siteImage.buffer, siteImage.ext) : null;
+            const photoFitted = photoDims
+              ? computeContainBox(photoDims.width, photoDims.height, PHOTO_OFF_X, PHOTO_OFF_Y, LEFT_BOX_WIDTH, PHOTO_HEIGHT)
+              : { offY: PHOTO_OFF_Y, extCy: PHOTO_HEIGHT };
+
             const mapBoxRect = {
               offX: PHOTO_OFF_X + LEFT_BOX_WIDTH + GAP,
-              offY: PHOTO_OFF_Y,
+              offY: photoFitted.offY,
               extCx: RIGHT_BOX_WIDTH,
-              extCy: PHOTO_HEIGHT,
+              extCy: photoFitted.extCy,
             };
             const { mapImage, routeLabel } = await fetchRouteMap(client, site, mapBoxRect);
 
@@ -873,11 +882,16 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
           // the box's nominal (taller) height — otherwise an uncropped landscape photo (which ends
           // up shorter than its box) and a map that fills its full box would visibly differ in
           // height even though neither is cropped.
+          const photoDims = siteImage?.buffer ? getImageDimensions(siteImage.buffer, siteImage.ext) : null;
+          const photoFitted = photoDims
+            ? computeContainBox(photoDims.width, photoDims.height, PHOTO_OFF_X, PHOTO_OFF_Y, LEFT_BOX_WIDTH, PHOTO_HEIGHT)
+            : { offY: PHOTO_OFF_Y, extCy: PHOTO_HEIGHT };
+
           const mapBoxRect = {
             offX: PHOTO_OFF_X + LEFT_BOX_WIDTH + GAP,
-            offY: PHOTO_OFF_Y,
+            offY: photoFitted.offY,
             extCx: RIGHT_BOX_WIDTH,
-            extCy: PHOTO_HEIGHT,
+            extCy: photoFitted.extCy,
           };
           const { mapImage, routeLabel } = await fetchRouteMap(client, site, mapBoxRect);
 

@@ -532,14 +532,7 @@ class PptxTemplate {
     let offX = 675481;
     let offY = 551656;
     let cy = 6096000;
-    // The image's own aspect ratio (when known) drives a "contain" fit into the narrowed left
-    // box — full photo, no crop, no stretch — instead of simply forcing the box to
-    // leftBoxWidthEMU (which would distort the photo whenever its aspect doesn't match the box).
     const imageDims = image && image.buffer ? getImageDimensions(image.buffer, image.ext) : null;
-    // Declared here (not just inside the `if` below) so the map's own contain-fit further down
-    // can target the photo's *actual* fitted height/offY instead of the box's raw (taller) cy —
-    // otherwise an uncropped photo (shorter than its box whenever its aspect doesn't match) and a
-    // map that fills its full box would visibly differ in height even though neither is cropped.
     let leftFitted = { offX, offY, extCx: leftBoxWidthEMU, extCy: cy };
     if (picBlockMatch) {
       const picBlock = picBlockMatch[0];
@@ -561,8 +554,7 @@ class PptxTemplate {
       const newTarget = await this.addMediaFile(image.buffer, image.ext);
       relsXml = this.replaceRelTarget(relsXml, relId, newTarget);
 
-      // No crop here — the pic's own xfrm was just resized/repositioned above for a "contain" fit,
-      // so the full (uncropped) photo is what that box is now sized to show.
+      // Full original image, no crop
       const rect = { l: 0, t: 0, r: 0, b: 0 };
       const target = `<a:blip r:embed="${relId}" cstate="print"><a:lum/></a:blip><a:srcRect/><a:stretch><a:fillRect/></a:stretch>`;
       const replacement = `<a:blip r:embed="${relId}" cstate="print"><a:lum/></a:blip><a:srcRect l="${rect.l}" t="${rect.t}" r="${rect.r}" b="${rect.b}"/><a:stretch><a:fillRect/></a:stretch>`;
@@ -586,8 +578,8 @@ class PptxTemplate {
       // fitted height (leftFitted), not the raw box cy, so the two end up the same height.
       const rect = { l: 0, t: 0, r: 0, b: 0 };
       const mapFitted = dims
-        ? computeContainBox(dims.width, dims.height, rightOffX, offY, rightBoxWidthEMU, cy)
-        : { offX: rightOffX, offY, extCx: rightBoxWidthEMU, extCy: cy };
+        ? computeContainBox(dims.width, dims.height, rightOffX, leftFitted.offY, rightBoxWidthEMU, leftFitted.extCy)
+        : { offX: rightOffX, offY: leftFitted.offY, extCx: rightBoxWidthEMU, extCy: leftFitted.extCy };
       const shapeId = 9500 + this._nextSlideIndex;
       const mapPic =
         `<p:pic><p:nvPicPr><p:cNvPr id="${shapeId}" name="Map Picture"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>` +
