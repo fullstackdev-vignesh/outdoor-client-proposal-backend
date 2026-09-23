@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { PptxTemplate, extOf } = require('./pptxTemplateEngine');
+const { PptxTemplate, extOf, computeContainBox, getImageDimensions } = require('./pptxTemplateEngine');
 const { generateExcelFromTemplate } = require('./excelTemplateEngine');
 const { getExcelConfig } = require('../config/excelTemplateConfigs');
 const { getRouteMapBuffer } = require('./mapService');
@@ -27,6 +27,15 @@ const ADINN_MEDIA_SPEC_BOX_WIDTHS = [
   { offX: 15377227, offY: 8408521, widthEMU: 2700000 }, // Unit value
 ];
 
+// Mirrors the "contain" fit cloneAdinnSiteSlide's `images` array applies to a map image's own
+// <p:pic>, so a route-info label can be anchored to the actually-visible (possibly letterboxed)
+// map rect instead of its raw box — matching what insertImageOrPlaceholder returns for the same
+// purpose when it places the map pic itself.
+function fittedMapRect(mapImage, box) {
+  const dims = mapImage?.buffer ? getImageDimensions(mapImage.buffer, mapImage.ext) : null;
+  return dims ? computeContainBox(dims.width, dims.height, box.offX, box.offY, box.extCx, box.extCy) : box;
+}
+
 function sanitizePathSegment(value) {
   return (
     String(value || '')
@@ -42,11 +51,28 @@ function parseCoord(val) {
   return Number.isFinite(num) ? num : null;
 }
 
+// Converts a map box's EMU aspect ratio into a pixel width/height for the rendered route map, so
+// the map image comes back already matching its destination box instead of relying on "contain"
+// fit to paper over the mismatch with letterboxing. Clamped to a sane render-size range (OSM tile
+// fetch count grows with pixel area) while keeping the box's exact aspect ratio.
+function mapPixelSize(extCx, extCy) {
+  if (!extCx || !extCy) return { width: 640, height: 480 };
+  const aspect = extCx / extCy;
+  const basePx = 720;
+  let width = aspect >= 1 ? basePx : Math.round(basePx * aspect);
+  let height = aspect >= 1 ? Math.round(basePx / aspect) : basePx;
+  width = Math.min(Math.max(width, 320), 960);
+  height = Math.min(Math.max(height, 320), 960);
+  return { width, height };
+}
+
 // Shared by every template's "With Location" map fetch — resolves client<->site coordinates to
 // a real route map image plus a short "19 mins • 6.8 km" label (or nulls when
 // coordinates are missing, in which case callers fall back to the
-// usual "Insert your map image here" placeholder and skip the label entirely).
-async function fetchRouteMap(client, site) {
+// usual "Insert your map image here" placeholder and skip the label entirely). `box` (the map's
+// destination { extCx, extCy } in EMU) is optional — when given, the map is rendered to match that
+// box's aspect ratio so it fills the box completely instead of being letterboxed within it.
+async function fetchRouteMap(client, site, box) {
   const fLat = parseCoord(client.latitude);
   const fLng = parseCoord(client.longitude);
   const tLat = parseCoord(site.latitude);
@@ -56,11 +82,14 @@ async function fetchRouteMap(client, site) {
     return { mapImage: null, routeLabel: null };
   }
 
+  const { width, height } = box ? mapPixelSize(box.extCx, box.extCy) : { width: 640, height: 480 };
   const result = await getRouteMapBuffer({
     fromLat: fLat,
     fromLng: fLng,
     toLat: tLat,
     toLng: tLng,
+    width,
+    height,
   });
   if (!result) return { mapImage: null, routeLabel: null };
   const routeLabel = [result.durationText, result.distanceText].filter(Boolean).join(' • ') || null;
@@ -217,7 +246,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
       let mapImage = null;
       let routeLabel = null;
       if (withLocation) {
-        ({ mapImage, routeLabel } = await fetchRouteMap(client, site));
+        ({ mapImage, routeLabel } = await fetchRouteMap(client, site, { extCx: 5775471, extCy: 7076491 }));
       }
 
       const images = [];
@@ -227,9 +256,14 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
           ...siteImage,
           boxWidthEMU: withLocation ? 10576310 : 16766194,
           boxHeightEMU: 7076491,
+          // Only fit "contain" (full image, no crop) when it's sharing the slide with a map —
+          // the single full-bleed photo shown "Without Location" keeps its existing cover look.
+          fitContain: withLocation,
         });
       }
-      if (mapImage) images.push({ relId: 'rId3', ...mapImage, boxWidthEMU: 5775471, boxHeightEMU: 7076491 });
+      if (mapImage) {
+        images.push({ relId: 'rId3', ...mapImage, boxWidthEMU: 5775471, boxHeightEMU: 7076491, fitContain: true });
+      }
 
       const slideBase = await tpl.cloneAdinnSiteSlide(siteDetailTpl, {
         textReplacements: [['OMR Padur Nr. Hindustan College twds Solinganallur – 30x25', titleText]],
@@ -253,13 +287,8 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
             : undefined,
       });
       if (mapImage && routeLabel) {
-        await tpl.insertMapLabel(`ppt/slides/${slideBase}.xml`, {
-          offX: 11739398,
-          offY: 2105609,
-          extCx: 5775471,
-          extCy: 7076491,
-          text: routeLabel,
-        });
+        const mapBox = { offX: 11739398, offY: 2105609, extCx: 5775471, extCy: 7076491 };
+        await tpl.insertMapLabel(`ppt/slides/${slideBase}.xml`, { ...fittedMapRect(mapImage, mapBox), text: routeLabel });
       }
       siteSlideBaseNames.push(slideBase);
     }
@@ -358,7 +387,15 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
       const slide4Base = await tpl.cloneAdinnSiteSlide('slide4', {
         textReplacements,
         images: siteImage
-          ? [{ relId: 'rId6', ...siteImage, boxWidthEMU: withLocation ? PHOTO_BOX_LEFT_WIDTH : 11366193, boxHeightEMU: PHOTO_BOX_HEIGHT }]
+          ? [
+              {
+                relId: 'rId6',
+                ...siteImage,
+                boxWidthEMU: withLocation ? PHOTO_BOX_LEFT_WIDTH : 11366193,
+                boxHeightEMU: PHOTO_BOX_HEIGHT,
+                fitContain: withLocation,
+              },
+            ]
           : [],
         boxWidths: withLocation ? [] : DIRECT_CLIENT_BOX_WIDTHS,
         // "With Location" removes the Site Info card outright (not just when the site has none),
@@ -384,20 +421,20 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
       });
 
       if (withLocation) {
-        const { mapImage, routeLabel } = await fetchRouteMap(client, site);
         const mapBoxRect = {
           offX: PHOTO_BOX_RIGHT_X,
           offY: PHOTO_BOX_OFF_Y,
           extCx: PHOTO_BOX_RIGHT_WIDTH,
           extCy: PHOTO_BOX_HEIGHT,
         };
-        await tpl.insertImageOrPlaceholder(`ppt/slides/${slide4Base}.xml`, `ppt/slides/_rels/${slide4Base}.xml.rels`, {
-          ...mapBoxRect,
-          buffer: mapImage?.buffer,
-          ext: mapImage?.ext,
-        });
+        const { mapImage, routeLabel } = await fetchRouteMap(client, site, mapBoxRect);
+        const fittedMapBox = await tpl.insertImageOrPlaceholder(
+          `ppt/slides/${slide4Base}.xml`,
+          `ppt/slides/_rels/${slide4Base}.xml.rels`,
+          { ...mapBoxRect, buffer: mapImage?.buffer, ext: mapImage?.ext }
+        );
         if (mapImage && routeLabel) {
-          await tpl.insertMapLabel(`ppt/slides/${slide4Base}.xml`, { ...mapBoxRect, text: routeLabel });
+          await tpl.insertMapLabel(`ppt/slides/${slide4Base}.xml`, { ...fittedMapBox, text: routeLabel });
         }
       }
 
@@ -482,10 +519,18 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
       // map image here" placeholder. Same reasoning as slide 4: leave the full-bleed background
       // (rId2) untouched.
       const mapBoxRect = { offX: 11605227, offY: 1587800, extCx: 6508010, extCy: 7646052 };
-      const { mapImage, routeLabel } = await fetchRouteMap(client, site);
-      const slide5Images = siteImage ? [{ relId: 'rId9', ...siteImage, boxWidthEMU: 10484172, boxHeightEMU: 7646052 }] : [];
+      const { mapImage, routeLabel } = await fetchRouteMap(client, site, mapBoxRect);
+      const slide5Images = siteImage
+        ? [{ relId: 'rId7', ...siteImage, boxWidthEMU: 10484172, boxHeightEMU: 7646052, fitContain: true }]
+        : [];
       if (mapImage) {
-        slide5Images.push({ relId: 'rId5', ...mapImage, boxWidthEMU: mapBoxRect.extCx, boxHeightEMU: mapBoxRect.extCy });
+        slide5Images.push({
+          relId: 'rId5',
+          ...mapImage,
+          boxWidthEMU: mapBoxRect.extCx,
+          boxHeightEMU: mapBoxRect.extCy,
+          fitContain: true,
+        });
       }
       const slide5Base = await tpl.cloneAdinnSiteSlide('slide5', {
         textReplacements: [titleReplacement],
@@ -494,7 +539,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
         placeholderText: mapImage ? undefined : { ...mapBoxRect, text: 'Insert your map image here' },
       });
       if (mapImage && routeLabel) {
-        await tpl.insertMapLabel(`ppt/slides/${slide5Base}.xml`, { ...mapBoxRect, text: routeLabel });
+        await tpl.insertMapLabel(`ppt/slides/${slide5Base}.xml`, { ...fittedMapRect(mapImage, mapBoxRect), text: routeLabel });
       }
       siteSlideBaseNames.push(slide5Base);
     }
@@ -559,15 +604,28 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
 
         let photoBase;
         if (withLocation) {
-          const { mapImage, routeLabel } = await fetchRouteMap(client, site);
+          // Even 50/50 split of the original single-photo span (675481 to 9448801+675481, i.e.
+          // 9448801 wide) minus the fixed gap between the two boxes. Template's own photo box is
+          // (offX=675481, offY=551656, cy=6096000) — mirrored here to predict the photo's own
+          // contain-fit result (clonePhotoWithMapSlide computes the identical thing internally),
+          // so the route map is rendered to match that *actual* final height, not the taller
+          // nominal box height, keeping the map's own contain-fit from adding its own letterbox.
+          const PHOTO_MAP_GAP = 100000;
+          const HALF_WIDTH = Math.floor((9448801 - PHOTO_MAP_GAP) / 2);
+          const photoDims = siteImage?.buffer ? getImageDimensions(siteImage.buffer, siteImage.ext) : null;
+          const photoFitted = photoDims
+            ? computeContainBox(photoDims.width, photoDims.height, 675481, 551656, HALF_WIDTH, 6096000)
+            : { extCy: 6096000 };
+          const { mapImage, routeLabel } = await fetchRouteMap(client, site, { extCx: HALF_WIDTH, extCy: photoFitted.extCy });
            photoBase = await tpl.clonePhotoWithMapSlide('slide3', {
             locationText,
             sizeText,
             image: siteImage,
             mapImage,
             mapLabel: routeLabel,
-            leftBoxWidthEMU: 5674400,
-            rightBoxWidthEMU: 3674401,
+            leftBoxWidthEMU: HALF_WIDTH,
+            rightBoxWidthEMU: HALF_WIDTH,
+            gapEMU: PHOTO_MAP_GAP,
           });
         } else {
            photoBase = await tpl.clonePhotoOnlySlide('slide3', {
@@ -658,14 +716,19 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
 
           // Original photo box (offX=1209675, offY=436563, cy=6005512) spans 9772650 wide with an
           // equal 1209675 margin on both sides (slide width 12192000). "With Location" splits that
-          // same span into a narrower left photo + a right map box (adinn-photos-only's pattern),
-          // so the pair together still fits exactly where the single photo used to sit.
+          // same span into an even 50/50 left photo + right map box (adinn-photos-only's pattern),
+          // so the pair together still fits exactly where the single photo used to sit. Both sides
+          // are shown "contain" (full image, no crop — see fitImageContain below), and the map box
+          // is later matched to the photo's own actually-visible height, so an even width split
+          // still ends up with both images the same height on screen regardless of the photo's
+          // native aspect ratio.
           const PHOTO_OFF_X = 1209675;
           const PHOTO_OFF_Y = 436563;
           const PHOTO_HEIGHT = 6005512;
-          const LEFT_BOX_WIDTH = withLocation ? 5872650 : 9772650;
           const GAP = 100000;
-          const RIGHT_BOX_WIDTH = 3800000;
+          const HALF_WIDTH = Math.floor((9772650 - GAP) / 2);
+          const RIGHT_BOX_WIDTH = HALF_WIDTH;
+          const LEFT_BOX_WIDTH = withLocation ? HALF_WIDTH : 9772650;
 
           const siteBase = await tpl.cloneCaptionPhotoSlide(siteDetailTpl, {
             captionText,
@@ -674,6 +737,9 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
             boxWidthEMU: LEFT_BOX_WIDTH,
             boxHeightEMU: PHOTO_HEIGHT,
             captionAnchorMarker: '<p:cNvSpPr txBox="1">',
+            // "With Location" follows up with fitImageContain below — skip the cover-crop here so
+            // that call (not this one) is what decides the final crop/position.
+            fitContain: withLocation,
           });
 
           if (withLocation) {
@@ -682,22 +748,35 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
               offY: PHOTO_OFF_Y,
               newWidthEMU: LEFT_BOX_WIDTH,
             });
+            // Now that the photo box has its final (narrowed) width, fit the site photo fully
+            // inside it — no crop, no stretch — instead of leaving it distort-stretched to fill.
+            await tpl.fitImageContain(`ppt/slides/${siteBase}.xml`, 'rId2', siteImage?.buffer, siteImage?.ext);
 
-            const { mapImage, routeLabel } = await fetchRouteMap(client, site);
+            // Mirrors the contain-fit fitImageContain just applied to the photo, so the map box
+            // is sized/positioned to exactly match the photo's own actually-visible height instead
+            // of the box's nominal (taller) height — otherwise an uncropped landscape photo (which
+            // ends up shorter than its box) and a map that fills its full box would visibly differ
+            // in height even though neither is cropped.
+            const photoDims = siteImage?.buffer ? getImageDimensions(siteImage.buffer, siteImage.ext) : null;
+            const photoFitted = photoDims
+              ? computeContainBox(photoDims.width, photoDims.height, PHOTO_OFF_X, PHOTO_OFF_Y, LEFT_BOX_WIDTH, PHOTO_HEIGHT)
+              : { offY: PHOTO_OFF_Y, extCy: PHOTO_HEIGHT };
+
             const mapBoxRect = {
               offX: PHOTO_OFF_X + LEFT_BOX_WIDTH + GAP,
-              offY: PHOTO_OFF_Y,
+              offY: photoFitted.offY,
               extCx: RIGHT_BOX_WIDTH,
-              extCy: PHOTO_HEIGHT,
+              extCy: photoFitted.extCy,
             };
+            const { mapImage, routeLabel } = await fetchRouteMap(client, site, mapBoxRect);
 
-            await tpl.insertImageOrPlaceholder(
+            const fittedMapBox = await tpl.insertImageOrPlaceholder(
               `ppt/slides/${siteBase}.xml`,
               `ppt/slides/_rels/${siteBase}.xml.rels`,
               { ...mapBoxRect, buffer: mapImage?.buffer, ext: mapImage?.ext }
             );
             if (mapImage && routeLabel) {
-              await tpl.insertMapLabel(`ppt/slides/${siteBase}.xml`, { ...mapBoxRect, text: routeLabel });
+              await tpl.insertMapLabel(`ppt/slides/${siteBase}.xml`, { ...fittedMapBox, text: routeLabel });
             }
           }
 
@@ -765,20 +844,27 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
 
         // Original photo box (offX=571472, offY=928670, cy=4982010) spans 8072494 wide, ending
         // near the slide's right edge (slide width 9144000). "With Location" splits that same
-        // span into a narrower left photo + a right map box, so the pair fits exactly where the
+        // span into an even 50/50 left photo + right map box, so the pair fits exactly where the
         // single photo used to sit — same pattern as publicis-ooh-template/adinn-photos-only.
+        // Both sides are shown "contain" (no crop — see fitImageContain below), and the map box is
+        // later matched to the photo's own actually-visible height, so an even width split still
+        // ends up with both images the same height regardless of the photo's native aspect ratio.
         const PHOTO_OFF_X = 571472;
         const PHOTO_OFF_Y = 928670;
         const PHOTO_HEIGHT = 4982010;
-        const LEFT_BOX_WIDTH = withLocation ? 4772494 : 8072494;
         const GAP = 100000;
-        const RIGHT_BOX_WIDTH = 3200000;
+        const HALF_WIDTH = Math.floor((8072494 - GAP) / 2);
+        const RIGHT_BOX_WIDTH = HALF_WIDTH;
+        const LEFT_BOX_WIDTH = withLocation ? HALF_WIDTH : 8072494;
 
         const siteBase = await tpl.cloneCaptionPhotoSlide(siteDetailTpl, {
           captionText,
           image: siteImage,
           boxWidthEMU: LEFT_BOX_WIDTH,
           boxHeightEMU: PHOTO_HEIGHT,
+          // "With Location" follows up with fitImageContain below — skip the cover-crop here so
+          // that call (not this one) is what decides the final crop/position.
+          fitContain: withLocation,
         });
 
         if (withLocation) {
@@ -787,22 +873,35 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
             offY: PHOTO_OFF_Y,
             newWidthEMU: LEFT_BOX_WIDTH,
           });
+          // Now that the photo box has its final (narrowed) width, fit the site photo fully
+          // inside it — no crop, no stretch — instead of leaving it distort-stretched to fill.
+          await tpl.fitImageContain(`ppt/slides/${siteBase}.xml`, 'rId3', siteImage?.buffer, siteImage?.ext);
 
-          const { mapImage, routeLabel } = await fetchRouteMap(client, site);
+          // Mirrors the contain-fit fitImageContain just applied to the photo, so the map box is
+          // sized/positioned to exactly match the photo's own actually-visible height instead of
+          // the box's nominal (taller) height — otherwise an uncropped landscape photo (which ends
+          // up shorter than its box) and a map that fills its full box would visibly differ in
+          // height even though neither is cropped.
+          const photoDims = siteImage?.buffer ? getImageDimensions(siteImage.buffer, siteImage.ext) : null;
+          const photoFitted = photoDims
+            ? computeContainBox(photoDims.width, photoDims.height, PHOTO_OFF_X, PHOTO_OFF_Y, LEFT_BOX_WIDTH, PHOTO_HEIGHT)
+            : { offY: PHOTO_OFF_Y, extCy: PHOTO_HEIGHT };
+
           const mapBoxRect = {
             offX: PHOTO_OFF_X + LEFT_BOX_WIDTH + GAP,
-            offY: PHOTO_OFF_Y,
+            offY: photoFitted.offY,
             extCx: RIGHT_BOX_WIDTH,
-            extCy: PHOTO_HEIGHT,
+            extCy: photoFitted.extCy,
           };
+          const { mapImage, routeLabel } = await fetchRouteMap(client, site, mapBoxRect);
 
-          await tpl.insertImageOrPlaceholder(
+          const fittedMapBox = await tpl.insertImageOrPlaceholder(
             `ppt/slides/${siteBase}.xml`,
             `ppt/slides/_rels/${siteBase}.xml.rels`,
             { ...mapBoxRect, buffer: mapImage?.buffer, ext: mapImage?.ext }
           );
           if (mapImage && routeLabel) {
-            await tpl.insertMapLabel(`ppt/slides/${siteBase}.xml`, { ...mapBoxRect, text: routeLabel });
+            await tpl.insertMapLabel(`ppt/slides/${siteBase}.xml`, { ...fittedMapBox, text: routeLabel });
           }
         }
 
@@ -916,16 +1015,16 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
             extCy: 5532209,
           });
 
-          const { mapImage, routeLabel } = await fetchRouteMap(client, site);
           const mapBoxRect = { offX: 10997898, offY: 3008554, extCx: 5982040, extCy: 5332209 };
+          const { mapImage, routeLabel } = await fetchRouteMap(client, site, mapBoxRect);
 
-          await tpl.insertImageOrPlaceholder(
+          const fittedMapBox = await tpl.insertImageOrPlaceholder(
             `ppt/slides/${siteBase}.xml`,
             `ppt/slides/_rels/${siteBase}.xml.rels`,
             { ...mapBoxRect, buffer: mapImage?.buffer, ext: mapImage?.ext }
           );
           if (mapImage && routeLabel) {
-            await tpl.insertMapLabel(`ppt/slides/${siteBase}.xml`, { ...mapBoxRect, text: routeLabel });
+            await tpl.insertMapLabel(`ppt/slides/${siteBase}.xml`, { ...fittedMapBox, text: routeLabel });
           }
         }
 

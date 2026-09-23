@@ -172,15 +172,16 @@ async function renderRouteMapImage({ fromLat, fromLng, toLat, toLng, width = 640
   const minLng = Math.min(...allLngs);
   const maxLng = Math.max(...allLngs);
 
-  // Zoom calculation with generous padding (200px) and capped max zoom (15) so the full route and
-  // pin markers fit comfortably inside the canvas with ample margin, preventing pins from being cut off.
+  // Zoom calculation with generous padding (280px) and capped max zoom (15) so the full route and
+  // pin markers fit comfortably inside the canvas with ample margin (140px on every side),
+  // ensuring pins are never cut off or hidden at the map edges.
   let zoom = 15;
   for (; zoom >= 2; zoom--) {
     const x1 = lonToX(minLng, zoom);
     const y1 = latToY(maxLat, zoom);
     const x2 = lonToX(maxLng, zoom);
     const y2 = latToY(minLat, zoom);
-    if (Math.abs(x2 - x1) <= width - 200 && Math.abs(y2 - y1) <= height - 200) {
+    if (Math.abs(x2 - x1) <= width - 280 && Math.abs(y2 - y1) <= height - 280) {
       break;
     }
   }
