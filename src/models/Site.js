@@ -72,7 +72,7 @@ const siteSchema = new mongoose.Schema(
     mediaId: { type: String, required: true, unique: true, trim: true },
     mediaName: { type: String, trim: true },
     mediaType: { type: String, required: true, trim: true },
-    quantity: { type: Number, default: 1, min: 0 },
+    quantity: { type: Number, default: 1, min: 0 }  ,
     state: { type: String, required: true, trim: true },
     city: { type: String, required: true, trim: true },
     location: { type: String, trim: true },

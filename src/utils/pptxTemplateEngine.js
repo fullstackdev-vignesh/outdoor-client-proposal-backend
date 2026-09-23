@@ -586,8 +586,8 @@ class PptxTemplate {
       // fitted height (leftFitted), not the raw box cy, so the two end up the same height.
       const rect = { l: 0, t: 0, r: 0, b: 0 };
       const mapFitted = dims
-        ? computeContainBox(dims.width, dims.height, rightOffX, leftFitted.offY, rightBoxWidthEMU, leftFitted.extCy)
-        : { offX: rightOffX, offY: leftFitted.offY, extCx: rightBoxWidthEMU, extCy: leftFitted.extCy };
+        ? computeContainBox(dims.width, dims.height, rightOffX, offY, rightBoxWidthEMU, cy)
+        : { offX: rightOffX, offY, extCx: rightBoxWidthEMU, extCy: cy };
       const shapeId = 9500 + this._nextSlideIndex;
       const mapPic =
         `<p:pic><p:nvPicPr><p:cNvPr id="${shapeId}" name="Map Picture"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>` +
