@@ -237,7 +237,7 @@ const forgotPin = asyncHandler(async (req, res) => {
     throw new Error('No registered email address found for this user account');
   }
 
-  const phpMailUrl = process.env.PHP_MAIL_URL || 'https://adinndigital.com/api/outdoormedia/forgotPinMail.php';
+  const phpMailUrl = process.env.PHP_MAIL_URL || 'https://adinndigital.com/api/outdoorproposal/forgotPinMail.php';
   const mailPayload = {
     mailtype: 'forgotpin',
     to: [targetEmail],
