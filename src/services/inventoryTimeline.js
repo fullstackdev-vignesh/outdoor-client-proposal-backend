@@ -105,6 +105,7 @@ async function syncBookingTimelineRecords(site, userId, source) {
         cancelledAt: b.cancelledAt,
         cancelledByName: b.cancelledByName,
         cancelledByRole: b.cancelledByRole,
+        cancellationType: b.cancellationType,
       };
     }
     // This runs on every save, so skip rows whose data is unchanged — otherwise every booking of
@@ -112,14 +113,18 @@ async function syncBookingTimelineRecords(site, userId, source) {
     const existing = await InventoryHistory.findOne({ site: site._id, bookingId: b.bookingId }).lean();
     if (existing && !bookingRowChanged(existing, update)) continue;
     update.updatedAt = now;
-    await InventoryHistory.findOneAndUpdate({ site: site._id, bookingId: b.bookingId }, { $set: update }, { upsert: true });
+    await InventoryHistory.findOneAndUpdate(
+      { site: site._id, bookingId: b.bookingId },
+      { $set: update, $setOnInsert: { bookedAt: b.createdAt || now } },
+      { upsert: true }
+    );
   }
 }
 
 // Compares only the data fields of a booking Timeline row (not who/when/source metadata).
 const BOOKING_ROW_FIELDS = ['mediaId', 'mediaType', 'state', 'city', 'mediaImage', 'siteOwner', 'status', 'isActive', 'effectiveFrom', 'effectiveTo'];
 const BOOKING_SNAPSHOT_FIELDS = ['customerType', 'client', 'customerName', 'startDate', 'endDate', 'durationDays', 'monthlyTotalCost', 'amount'];
-const CANCELLATION_SNAPSHOT_FIELDS = ['reason', 'cancelledAt', 'cancelledByName', 'cancelledByRole'];
+const CANCELLATION_SNAPSHOT_FIELDS = ['reason', 'cancelledAt', 'cancelledByName', 'cancelledByRole', 'cancellationType'];
 
 // Dates compare by time value, ObjectIds by hex string, and empty values as equal.
 function normalizeValue(v) {

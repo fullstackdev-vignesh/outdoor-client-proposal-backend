@@ -2,6 +2,7 @@ const asyncHandler = require('express-async-handler');
 const ExcelJS = require('exceljs');
 const Site = require('../models/Site');
 const SiteHistory = require('../models/SiteHistory');
+const Client = require('../models/Client');
 const { saveMediaImage } = require('../utils/imageStorage');
 const { calcDurationDays, calcBookingAmount, formatDateLabel, findOverlappingBooking, todayDateOnly } = require('../utils/bookingCalc');
 const { formatIST } = require('../utils/formatDate');
@@ -85,8 +86,9 @@ async function logBookingChanges(siteId, beforeBookings, afterBookings, userId, 
 // Marks a single booking record cancelled in place (never removes it — Timeline/history need
 // the original booking to still exist). Caller is responsible for site.markModified('bookings'),
 // resolveSiteStatus(site) and site.save() afterwards.
-function applyBookingCancellation(booking, reason, user) {
+function applyBookingCancellation(booking, reason, user, type = 'manual') {
   booking.status = 'cancelled';
+  booking.cancellationType = type;
   booking.cancellationReason = reason;
   booking.cancelledAt = nowIST();
   booking.cancelledBy = user._id;
@@ -121,12 +123,32 @@ function unblockSite(site, { wasBlocked, user, cancelCurrentBooking = true }) {
   for (const b of site.bookings || []) {
     if (b.status === 'cancelled') continue;
     if (utcDay(b.startDate) <= today && utcDay(b.endDate) >= today) {
-      applyBookingCancellation(b, 'Booking ended — site was blocked', user);
+      applyBookingCancellation(b, 'Booking ended — site was blocked', user, 'blocked');
       cancelled.push(b);
     }
   }
   if (cancelled.length) site.markModified('bookings');
   return cancelled;
+}
+
+// Bookings made from the status popup may arrive with only a client id. Store the client's name
+// on every booking that lacks one (the new booking and any older ones), so lists and the
+// Timeline can always show "Client: <name>".
+async function fillMissingCustomerNames(site) {
+  const missing = (site.bookings || []).filter((b) => !b.customerName && b.client);
+  if (!missing.length) return;
+  const ids = [...new Set(missing.map((b) => String(b.client)))];
+  const clients = await Client.find({ _id: { $in: ids } }).select('name').lean();
+  const nameById = new Map(clients.map((c) => [String(c._id), c.name]));
+  let changed = false;
+  for (const b of missing) {
+    const name = nameById.get(String(b.client));
+    if (name) {
+      b.customerName = name;
+      changed = true;
+    }
+  }
+  if (changed) site.markModified('bookings');
 }
 
 // One explicit, readable SiteHistory row for a cancellation — deliberately not run through
@@ -334,7 +356,14 @@ function buildBookingRecord(site, input, userId, existingBooking) {
 // Table quick-action path (StatusChangeModal/BulkStatusModal) — one booking at a time.
 // Edits the site's currently ACTIVE booking in place if there is one (so adjusting dates on
 // today's campaign doesn't create a duplicate row); otherwise appends a new booking.
-function upsertActiveBooking(site, input, userId) {
+// `mode: 'new'` always appends a separate booking (e.g. a second client for later dates) — it
+// never touches the existing ones; the overlap check still rejects clashing dates.
+function upsertActiveBooking(site, input, userId, { mode = 'edit' } = {}) {
+  if (mode === 'new') {
+    const record = buildBookingRecord(site, input, userId, null);
+    site.bookings = [...(site.bookings || []), record];
+    return record;
+  }
   const activeId = site.mediaStatus === 'booked' ? site.bookingInfo?.bookingId : undefined;
   const bookings = site.bookings || [];
   const existingIndex = activeId ? bookings.findIndex((b) => b.bookingId === activeId) : -1;
@@ -523,6 +552,7 @@ const updateSite = asyncHandler(async (req, res) => {
     resolveSiteStatus(site);
   }
 
+  await fillMissingCustomerNames(site);
   try {
     await site.save();
   } catch (err) {
@@ -566,7 +596,7 @@ const changeStatus = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error('Site not found');
   }
-  const { mediaStatus, blockReason, blockNotes, bookingInfo, source, cancellationReason, reason } = req.body;
+  const { mediaStatus, blockReason, blockNotes, bookingInfo, source, cancellationReason, reason, bookingMode } = req.body;
   const before = site.toObject();
   const beforeBookings = before.bookings || [];
   const beforeStatus = before.mediaStatus;
@@ -594,7 +624,7 @@ const changeStatus = asyncHandler(async (req, res) => {
     cancelledBookings = unblockSite(site, { wasBlocked: beforeStatus === 'blocked', user: req.user });
     if (mediaStatus === 'booked') {
       try {
-        upsertActiveBooking(site, bookingInfo, req.user._id);
+        upsertActiveBooking(site, bookingInfo, req.user._id, { mode: bookingMode === 'new' ? 'new' : 'edit' });
       } catch (err) {
         res.status(400);
         throw err;
@@ -622,6 +652,7 @@ const changeStatus = asyncHandler(async (req, res) => {
     resolveSiteStatus(site);
   }
 
+  await fillMissingCustomerNames(site);
   await site.save();
 
   const statusChanged = beforeStatus !== site.mediaStatus || beforeBookingId !== site.bookingInfo?.bookingId;
@@ -720,7 +751,8 @@ const bulkChangeStatus = asyncHandler(async (req, res) => {
       cancelledBookings = unblockSite(site, { wasBlocked: beforeStatus === 'blocked', user: req.user });
       if (mediaStatus === 'booked') {
         try {
-          upsertActiveBooking(site, bookingInfo, req.user._id);
+          // Bulk has no per-site booking to edit — always add a separate new booking.
+          upsertActiveBooking(site, bookingInfo, req.user._id, { mode: 'new' });
         } catch (err) {
           skipped.push({ site: site.mediaId, reason: err.message });
           continue;
@@ -729,6 +761,7 @@ const bulkChangeStatus = asyncHandler(async (req, res) => {
       resolveSiteStatus(site);
     }
 
+    await fillMissingCustomerNames(site);
     await site.save();
 
     const statusChanged = beforeStatus !== site.mediaStatus || beforeBookingId !== site.bookingInfo?.bookingId;
@@ -754,11 +787,52 @@ const getSiteHistory = asyncHandler(async (req, res) => {
   res.json(history);
 });
 
+const AUTO_BLOCK_END_REASON = 'Booking ended — site was blocked';
+
+// A site's full history as a list of EVENTS, newest first (current state on top), in the order
+// the user actually made the changes. A booking's history row is updated in place when it's
+// cancelled, so it's expanded back into its steps here:
+//   • "Booked" at the time the booking was made — always shown, even if it was later cancelled;
+//   • "Booking Cancelled" at the cancel time — only for a real (manual) cancellation. A booking
+//     that ended automatically because the site was blocked is NOT a separate step; the Booked
+//     event just carries `endedEarlyAt` ("Ended early — site was blocked").
 const getSiteTimeline = asyncHandler(async (req, res) => {
-  const timeline = await InventoryHistory.find({ site: req.params.id })
-    .sort({ effectiveFrom: 1 })
-    .populate('changedBy', 'name');
-  res.json(timeline.map((t) => ({ ...t.toObject(), bookingLifecycle: computeBookingLifecycle(t) })));
+  const [rows, site] = await Promise.all([
+    InventoryHistory.find({ site: req.params.id }).populate('changedBy', 'name').lean(),
+    Site.findById(req.params.id).select('bookings.bookingId bookings.createdAt').lean(),
+  ]);
+  const bookingCreatedAt = new Map((site?.bookings || []).map((b) => [b.bookingId, b.createdAt]));
+  // Rows are stored in IST-shifted time (nowIST); an ObjectId's own timestamp is real UTC.
+  const insertedAt = (row) => new Date(row._id.getTimestamp().getTime() + IST_OFFSET_MS);
+
+  const events = [];
+  for (const row of rows) {
+    const isBookingRow = row.status === 'booked' || row.status === 'cancelled';
+    if (!isBookingRow) {
+      events.push({ ...row, eventKey: `${row._id}`, eventAt: row.changedAt });
+      continue;
+    }
+    const cancel = row.cancellationSnapshot || {};
+    const endedByBlock =
+      row.status === 'cancelled' && (cancel.cancellationType === 'blocked' || cancel.reason === AUTO_BLOCK_END_REASON);
+    const bookedAt = row.bookedAt || bookingCreatedAt.get(row.bookingId) || insertedAt(row);
+
+    events.push({
+      ...row,
+      status: 'booked',
+      eventKey: `${row._id}-booked`,
+      eventAt: bookedAt,
+      bookingLifecycle: row.status === 'cancelled' ? null : computeBookingLifecycle(row),
+      endedEarlyAt: endedByBlock ? cancel.cancelledAt : undefined,
+      cancelled: row.status === 'cancelled' && !endedByBlock,
+    });
+    if (row.status === 'cancelled' && !endedByBlock) {
+      events.push({ ...row, eventKey: `${row._id}-cancelled`, eventAt: cancel.cancelledAt || row.changedAt });
+    }
+  }
+
+  events.sort((a, b) => new Date(b.eventAt) - new Date(a.eventAt) || String(b.eventKey).localeCompare(String(a.eventKey)));
+  res.json(events);
 });
 
 // Timeline rows are listed by when they were last updated (most recent first). Rows written
@@ -776,37 +850,114 @@ async function findTimelineByLatestUpdate(filter, { skip = 0, limit } = {}) {
   return InventoryHistory.populate(docs, { path: 'changedBy', select: 'name' });
 }
 
+// Timeline LIST: one row per site (not one per change), showing the site's CURRENT state — the
+// same status the Inventory page shows. The row is picked by matching the site's live status:
+//   • live Booked  → the history row of the booking that's live today (site.bookingInfo);
+//   • otherwise    → the still-open row (effectiveTo = null) of its live status (Available/Blocked).
+// Only if no row matches (e.g. the date filter excludes it) does it fall back to the most recent
+// non-cancelled row. Picking by "most recently updated" was wrong: blocking a site also touches
+// its booking row (isActive → false) a moment later, so the booking row won and the list kept
+// saying Booked. Sites are ordered by their latest change of any kind; `changeCount` is how many
+// history entries the site has (all shown in its "View" timeline).
+function groupedTimelinePipeline(filter) {
+  return [
+    { $match: filter },
+    {
+      $lookup: {
+        from: Site.collection.name,
+        localField: 'site',
+        foreignField: '_id',
+        as: '_site',
+        pipeline: [{ $project: { mediaStatus: 1, 'bookingInfo.bookingId': 1 } }],
+      },
+    },
+    {
+      $addFields: {
+        _siteStatus: { $arrayElemAt: ['$_site.mediaStatus', 0] },
+        _siteBookingId: { $arrayElemAt: ['$_site.bookingInfo.bookingId', 0] },
+        _latestUpdateAt: { $ifNull: ['$updatedAt', '$changedAt'] },
+        _isCancelled: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] },
+      },
+    },
+    {
+      $addFields: {
+        _isCurrent: {
+          $cond: [
+            {
+              $cond: [
+                { $eq: ['$_siteStatus', 'booked'] },
+                { $and: [{ $eq: ['$status', 'booked'] }, { $eq: ['$bookingId', '$_siteBookingId'] }] },
+                { $and: [{ $eq: ['$status', '$_siteStatus'] }, { $eq: [{ $ifNull: ['$effectiveTo', null] }, null] }] },
+              ],
+            },
+            1,
+            0,
+          ],
+        },
+      },
+    },
+    { $sort: { _isCurrent: -1, _isCancelled: 1, _latestUpdateAt: -1, _id: -1 } },
+    {
+      $group: {
+        _id: '$site',
+        row: { $first: '$$ROOT' },
+        changeCount: { $sum: 1 },
+        lastChangedAt: { $max: '$_latestUpdateAt' },
+        lastRowId: { $max: '$_id' },
+      },
+    },
+  ];
+}
+
+const TIMELINE_HELPER_FIELDS = { _site: 0, _siteStatus: 0, _siteBookingId: 0, _latestUpdateAt: 0, _isCancelled: 0, _isCurrent: 0 };
+
+// `status` (optional) filters by the site's CURRENT status — so the "Booked Sites" card, the
+// status dropdown and the list all agree.
+async function findTimelineGroupedBySite(filter, { status, skip = 0, limit } = {}) {
+  const page = [{ $sort: { lastChangedAt: -1, lastRowId: -1 } }];
+  if (skip) page.push({ $skip: skip });
+  if (limit) page.push({ $limit: limit });
+  page.push(
+    { $replaceRoot: { newRoot: { $mergeObjects: ['$row', { changeCount: '$changeCount', lastChangedAt: '$lastChangedAt' }] } } },
+    { $project: TIMELINE_HELPER_FIELDS }
+  );
+  const [result] = await InventoryHistory.aggregate([
+    ...groupedTimelinePipeline(filter),
+    ...(status ? [{ $match: { 'row.status': status } }] : []),
+    { $facet: { items: page, total: [{ $count: 'n' }] } },
+  ]);
+  const items = await InventoryHistory.populate(result.items, { path: 'changedBy', select: 'name' });
+  return { items, total: result.total[0]?.n || 0 };
+}
+
 const getTimeline = asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(100, Number(req.query.limit) || 20);
-  const filter = buildOverlapFilter(req.query);
+  // Status is applied AFTER grouping (current status), not to individual history rows.
+  const filter = buildOverlapFilter({ ...req.query, mediaStatus: undefined });
 
-  const [rows, total, distinctSites] = await Promise.all([
-    findTimelineByLatestUpdate(filter, { skip: (page - 1) * limit, limit }),
-    InventoryHistory.countDocuments(filter),
-    InventoryHistory.distinct('site', filter),
-  ]);
-  const items = rows.map((t) => ({ ...t.toObject(), bookingLifecycle: computeBookingLifecycle(t) }));
+  const { items: rows, total } = await findTimelineGroupedBySite(filter, {
+    status: req.query.mediaStatus || undefined,
+    skip: (page - 1) * limit,
+    limit,
+  });
+  const items = rows.map((t) => ({ ...t, bookingLifecycle: computeBookingLifecycle(t) }));
 
-  res.json({ items, total, distinctSiteCount: distinctSites.length, page, pages: Math.ceil(total / limit) });
+  res.json({ items, total, distinctSiteCount: total, page, pages: Math.ceil(total / limit) });
 });
 
+// Cards count each site ONCE, by the same current status the list shows — so
+// Available + Booked + Blocked always adds up to Total.
 const getTimelineSummary = asyncHandler(async (req, res) => {
   const baseFilter = buildOverlapFilter({ ...req.query, mediaStatus: undefined });
-
-  const distinctByStatus = async (status) => {
-    const ids = await InventoryHistory.distinct('site', { ...baseFilter, status });
-    return ids.length;
-  };
-
-  const [totalIds, available, booked, blocked] = await Promise.all([
-    InventoryHistory.distinct('site', baseFilter),
-    distinctByStatus('available'),
-    distinctByStatus('booked'),
-    distinctByStatus('blocked'),
+  const counts = await InventoryHistory.aggregate([
+    ...groupedTimelinePipeline(baseFilter),
+    { $group: { _id: '$row.status', n: { $sum: 1 } } },
   ]);
+  const by = Object.fromEntries(counts.map((c) => [c._id, c.n]));
+  const total = counts.reduce((sum, c) => sum + c.n, 0);
 
-  res.json({ total: totalIds.length, available, booked, blocked });
+  res.json({ total, available: by.available || 0, booked: by.booked || 0, blocked: by.blocked || 0 });
 });
 
 const bulkImport = asyncHandler(async (req, res) => {

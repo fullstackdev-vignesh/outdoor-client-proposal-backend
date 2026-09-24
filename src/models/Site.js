@@ -48,6 +48,9 @@ const bookingRecordSchema = new mongoose.Schema(
     cancelledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     cancelledByName: String,
     cancelledByRole: String,
+    // 'blocked' = ended automatically because the site was blocked mid-booking; 'manual' = a user
+    // cancelled it with their own reason. Lets the Timeline show the two differently.
+    cancellationType: { type: String, enum: ['manual', 'blocked'] },
   },
   { _id: false }
 );

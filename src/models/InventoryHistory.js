@@ -27,6 +27,9 @@ const inventoryHistorySchema = new mongoose.Schema({
 
   // When the user actually performed the update (distinct from the effective period).
   changedAt: { type: Date, default: nowIST },
+  // Booking rows only: when the booking was first made. Unlike changedAt it is never
+  // overwritten, so the Timeline can still show the original "Booked" step after a cancel.
+  bookedAt: Date,
   // Last time this row's data actually changed (created, period closed, booking edited or
   // cancelled). Drives the Timeline list order. Older rows may lack it — readers fall back to
   // changedAt.
@@ -56,6 +59,7 @@ const inventoryHistorySchema = new mongoose.Schema({
     cancelledAt: Date,
     cancelledByName: String,
     cancelledByRole: String,
+    cancellationType: { type: String, enum: ['manual', 'blocked'] },
   },
 });
 
