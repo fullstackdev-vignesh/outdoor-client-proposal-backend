@@ -6,7 +6,7 @@ const REFERENCE_ROOT = path.join(__dirname, '..', '..', 'reference');
 
 async function saveTemplateFile(file) {
   const mime = file.mimetype || (file.originalname?.endsWith('.xlsx') ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'application/vnd.openxmlformats-officedocument.presentationml.presentation');
-  return uploadFile(file.buffer, file.originalname, mime, 'proposal-templates');
+  return uploadFile(file.buffer, file.originalname, mime, 'outdoor-proposal/proposal-templates');
 }
 
 function safeFolderName(name) {

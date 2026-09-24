@@ -298,7 +298,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     const buffer = await tpl.save();
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
-    const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+    const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
     const fileName = buildGeneratedPptFileName(proposal, client, now);
 
     try {
@@ -446,7 +446,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     const buffer = await tpl.save();
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
-    const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+    const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
     const fileName = buildGeneratedPptFileName(proposal, client, now);
 
     try {
@@ -549,7 +549,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     const buffer = await tpl.save();
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
-    const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+    const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
     const fileName = buildGeneratedPptFileName(proposal, client, now);
 
     try {
@@ -646,7 +646,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     const buffer = await tpl.save();
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
-    const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+    const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
     const fileName = buildGeneratedPptFileName(proposal, client, now);
 
     try {
@@ -790,7 +790,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     const buffer = await tpl.save();
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
-    const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+    const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
     const fileName = buildGeneratedPptFileName(proposal, client, now);
 
     try {
@@ -914,7 +914,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     const buffer = await tpl.save();
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
-    const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+    const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
     const fileName = buildGeneratedPptFileName(proposal, client, now);
 
     try {
@@ -1037,7 +1037,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     const buffer = await tpl.save();
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
-    const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+    const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
     const fileName = buildGeneratedPptFileName(proposal, client, now);
 
     try {
@@ -1161,7 +1161,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
   // overwrites the same cloud object instead of piling up duplicates.
   const clientNameSafe = sanitizePathSegment(client.name);
   const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : new Date()).toISOString().slice(0, 10);
-  const folder = `ooh-proposals/${clientNameSafe}-${dateSegment}`;
+  const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
   const fileName = buildGeneratedPptFileName(proposal, client, now);
 
   let pptUrl;
@@ -1240,23 +1240,23 @@ async function generateProposalExcel(proposal) {
   const outBuffer = await generateExcelFromTemplate(rows, { buffer: buffer || undefined, config, client });
   const fileName = buildGeneratedFileName(proposal, client, new Date(), 'xlsx');
 
+  const clientNameSafe = sanitizePathSegment(client.name);
+  const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : new Date()).toISOString().slice(0, 10);
+  const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
+
   try {
-    // uploadFileToCloud (unlike uploadFile) uses the given fileName as the storage key as-is,
-    // instead of discarding it for a randomized one — same call PPT generation already uses, so
-    // the friendly "<Client>-<DD>-<Month>-<YYYY>-<proposalId>.xlsx" name survives into the actual
-    // download instead of showing a random storage-generated name.
     return await uploadFileToCloud(
       outBuffer,
       fileName,
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'generated'
+      folder
     );
   } catch (spaceErr) {
     console.warn('Cloud storage upload failed for Excel, falling back to local storage:', spaceErr.message);
-    const localDir = path.join(BACKEND_ROOT, 'uploads', 'generated');
+    const localDir = path.join(BACKEND_ROOT, 'uploads', 'outdoor-proposal');
     fs.mkdirSync(localDir, { recursive: true });
     fs.writeFileSync(path.join(localDir, fileName), outBuffer);
-    return `/uploads/generated/${fileName}`;
+    return `/uploads/outdoor-proposal/${fileName}`;
   }
 }
 

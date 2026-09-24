@@ -38,11 +38,17 @@ router.get('/', getSites);
 router.get('/:id/history', getSiteHistory);
 router.get('/:id/timeline', getSiteTimeline);
 router.get('/:id', getSite);
-router.post('/', authorize('admin', 'tl'), upload.single('mediaImage'), createSite);
-router.post('/upload-image', authorize('admin', 'tl'), upload.single('image'), uploadImage);
+const uploadFields = upload.fields([
+  { name: 'mediaImage', maxCount: 1 },
+  { name: 'image', maxCount: 1 },
+  { name: 'file', maxCount: 1 },
+]);
+
+router.post('/', authorize('admin', 'tl'), uploadFields, createSite);
+router.post('/upload-image', authorize('admin', 'tl'), uploadFields, uploadImage);
 router.post('/bulk-import', authorize('admin', 'tl'), bulkImport);
 router.patch('/bulk-status', authorize('admin', 'tl'), bulkChangeStatus);
-router.put('/:id', authorize('admin', 'tl'), upload.single('mediaImage'), updateSite);
+router.put('/:id', authorize('admin', 'tl'), uploadFields, updateSite);
 router.patch('/:id/status', authorize('admin', 'tl'), changeStatus);
 router.patch('/:id/bookings/:bookingId/cancel', authorize('admin', 'tl'), cancelBooking);
 router.delete('/:id', authorize('admin', 'tl'), deleteSite);

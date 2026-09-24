@@ -16,10 +16,17 @@ async function putToSpaces(buffer, key, mimeType) {
     DO_SPACES_SECRET,
     DO_SPACES_BUCKET,
     DO_SPACES_CDN_URL,
+    DO_SPACES_CDN_BASE,
   } = process.env;
 
   if (!DO_SPACES_ENDPOINT || !DO_SPACES_KEY || !DO_SPACES_SECRET || !DO_SPACES_BUCKET) {
     throw new Error('DigitalOcean Spaces is not configured. Set DO_SPACES_ENDPOINT, DO_SPACES_REGION, DO_SPACES_KEY, DO_SPACES_SECRET, DO_SPACES_BUCKET.');
+  }
+
+  // Ensure key always lives inside 'outdoor-proposal/' folder in Space
+  let finalKey = String(key || '').replace(/^\/+/, '');
+  if (!finalKey.startsWith('outdoor-proposal/')) {
+    finalKey = `outdoor-proposal/${finalKey}`;
   }
 
   const client = new S3Client({
@@ -31,33 +38,34 @@ async function putToSpaces(buffer, key, mimeType) {
   await client.send(
     new PutObjectCommand({
       Bucket: DO_SPACES_BUCKET,
-      Key: key,
+      Key: finalKey,
       Body: buffer,
       ACL: 'public-read',
       ContentType: mimeType || 'application/octet-stream',
     })
   );
 
-  const base = DO_SPACES_CDN_URL || `${DO_SPACES_ENDPOINT.replace('https://', `https://${DO_SPACES_BUCKET}.`)}`;
-  return `${base.replace(/\/$/, '')}/${key}`;
+  const base = DO_SPACES_CDN_BASE || DO_SPACES_CDN_URL || `${DO_SPACES_ENDPOINT.replace('https://', `https://${DO_SPACES_BUCKET}.`)}`;
+  return `${base.replace(/\/$/, '')}/${finalKey}`;
 }
 
-async function uploadFile(fileOrBuffer, originalName, mimeType, subFolder = 'media') {
+async function uploadFile(fileOrBuffer, originalName, mimeType, subFolder = 'outdoor-proposal/mediaImage') {
   const mode = (process.env.MEDIA_IMAGE_STORAGE || process.env.STORAGE_MODE || 'local').toLowerCase();
   const useSpace = mode === 'space' || mode === 'spaces' || mode === 'cloud';
 
   const buffer = Buffer.isBuffer(fileOrBuffer) ? fileOrBuffer : fileOrBuffer.buffer;
   const fileName = buildFileName(originalName);
+  const cleanSubFolder = subFolder ? subFolder.replace(/^\/+/, '') : 'outdoor-proposal/mediaImage';
 
   if (useSpace) {
-    return putToSpaces(buffer, `${subFolder}/${fileName}`, mimeType);
+    return putToSpaces(buffer, `${cleanSubFolder}/${fileName}`, mimeType);
   } else {
     // Local storage
-    const localDir = path.join(__dirname, '..', '..', 'uploads', subFolder);
+    const localDir = path.join(__dirname, '..', '..', 'uploads', cleanSubFolder);
     fs.mkdirSync(localDir, { recursive: true });
     const localPath = path.join(localDir, fileName);
     fs.writeFileSync(localPath, buffer);
-    return `/uploads/${subFolder}/${fileName}`;
+    return `/uploads/${cleanSubFolder}/${fileName}`;
   }
 }
 

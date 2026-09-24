@@ -228,12 +228,25 @@ function normalizeSiteBody(body) {
   return payload;
 }
 
+function extractUploadedFile(req) {
+  if (req.file) return req.file;
+  if (req.files) {
+    if (req.files.mediaImage && req.files.mediaImage[0]) return req.files.mediaImage[0];
+    if (req.files.image && req.files.image[0]) return req.files.image[0];
+    if (req.files.file && req.files.file[0]) return req.files.file[0];
+    const keys = Object.keys(req.files);
+    if (keys.length > 0 && req.files[keys[0]][0]) return req.files[keys[0]][0];
+  }
+  return null;
+}
+
 // Uploads the newly selected image (if any) via the existing storage logic and sets
 // payload.mediaImage to its public URL. If no new file was sent, mediaImage is left
 // untouched so an update never clears/overwrites the site's existing image.
 async function applyUploadedImage(payload, req) {
-  if (req.file) {
-    payload.mediaImage = await saveMediaImage(req.file);
+  const file = extractUploadedFile(req);
+  if (file) {
+    payload.mediaImage = await saveMediaImage(file);
   } else {
     delete payload.mediaImage;
   }
@@ -1001,11 +1014,12 @@ const exportTimeline = asyncHandler(async (req, res) => {
 });
 
 const uploadImage = asyncHandler(async (req, res) => {
-  if (!req.file) {
+  const file = extractUploadedFile(req);
+  if (!file) {
     res.status(400);
     throw new Error('No image file provided');
   }
-  const url = await saveMediaImage(req.file);
+  const url = await saveMediaImage(file);
   res.json({ url });
 });
 
