@@ -56,6 +56,7 @@ router.patch('/bulk-status', authorize('admin', 'tl'), bulkChangeStatus);
 router.put('/:id', authorize('admin', 'tl'), uploadFields, updateSite);
 router.patch('/:id/status', authorize('admin', 'tl'), changeStatus);
 router.patch('/:id/bookings/:bookingId/cancel', authorize('admin', 'tl'), cancelBooking);
-router.delete('/:id', authorize('admin', 'tl'), deleteSite);
+// Deleting a site is admin-only — TL, BD and User roles cannot delete.
+router.delete('/:id', authorize('admin'), deleteSite);
 
 module.exports = router;

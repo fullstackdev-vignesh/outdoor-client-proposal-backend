@@ -94,6 +94,41 @@ function applyBookingCancellation(booking, reason, user) {
   booking.cancelledByRole = user.role;
 }
 
+const utcDay = (value) => {
+  const d = new Date(value);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+};
+
+// Leaving the Blocked state (to Booked or Available). Must run BEFORE resolveSiteStatus, which
+// deliberately leaves blocked sites untouched — otherwise a blocked site could never be
+// re-booked or made available again.
+//
+// Blocking interrupts whatever booking was running, so the booking that covers TODAY is ended
+// (recorded as cancelled) on the way out — otherwise status recomputation would silently flip
+// the site back to Booked on "Available", and a new booking entered on "Booked" would be
+// rejected as overlapping it. Future (upcoming) bookings are kept.
+// `wasBlocked` must come from the saved (before) state, never from stale fields on the doc.
+// Returns the bookings it cancelled so the caller can log them.
+function unblockSite(site, { wasBlocked, user, cancelCurrentBooking = true }) {
+  if (!wasBlocked) return [];
+  site.mediaStatus = 'available';
+  site.blockInfo = undefined;
+  site.isActive = true;
+
+  if (!cancelCurrentBooking) return [];
+  const today = utcDay(new Date());
+  const cancelled = [];
+  for (const b of site.bookings || []) {
+    if (b.status === 'cancelled') continue;
+    if (utcDay(b.startDate) <= today && utcDay(b.endDate) >= today) {
+      applyBookingCancellation(b, 'Booking ended — site was blocked', user);
+      cancelled.push(b);
+    }
+  }
+  if (cancelled.length) site.markModified('bookings');
+  return cancelled;
+}
+
 // One explicit, readable SiteHistory row for a cancellation — deliberately not run through
 // logBookingChanges' generic field-diff format, since "Booking Cancelled" is a business event,
 // not a plain old-value → new-value edit.
@@ -191,8 +226,9 @@ function validateSitePayload(body) {
 
   if (body.width !== undefined && (isNaN(num(body.width)) || num(body.width) <= 0)) errors.push('Width must be a number greater than 0');
   if (body.height !== undefined && (isNaN(num(body.height)) || num(body.height) <= 0)) errors.push('Height must be a number greater than 0');
+  // Blank means "not given" (e.g. the optional Display Cost Per Month cleared on Edit).
   ['amount', 'gstAmount', 'monthlyAmount', 'printingCost', 'mountingCost'].forEach((f) => {
-    if (body[f] !== undefined && (isNaN(num(body[f])) || num(body[f]) < 0)) errors.push(`${f} must be a number greater than or equal to 0`);
+    if (num(body[f]) !== undefined && (isNaN(num(body[f])) || num(body[f]) < 0)) errors.push(`${f} must be a number greater than or equal to 0`);
   });
   if (body.latitude !== undefined && body.latitude !== '' && (isNaN(num(body.latitude)) || num(body.latitude) < -90 || num(body.latitude) > 90)) {
     errors.push('Latitude must be between -90 and 90');
@@ -444,6 +480,7 @@ const updateSite = asyncHandler(async (req, res) => {
   const beforeBookingId = before.bookingInfo?.bookingId;
 
   const { blockReason, blockNotes, bookingInfo, bookings: incomingBookings, ...siteFields } = payload;
+  let unblockCancelled = [];
   Object.assign(site, siteFields);
   Site.applyComputedFields(site);
 
@@ -463,8 +500,9 @@ const updateSite = asyncHandler(async (req, res) => {
     }
     site.isActive = false;
   } else {
+    const targetStatus = site.mediaStatus;
     const bookingList = Array.isArray(incomingBookings) ? incomingBookings : bookingInfo ? [bookingInfo] : null;
-    if (site.mediaStatus === 'booked' && bookingList) {
+    if (targetStatus === 'booked' && bookingList) {
       try {
         site.bookings = buildBookingsArray(site, bookingList, req.user._id);
       } catch (err) {
@@ -472,6 +510,14 @@ const updateSite = asyncHandler(async (req, res) => {
         throw err;
       }
     }
+    // Coming out of Blocked. → Available: the booking that was running when the site got blocked
+    // ends, so the site really becomes Available. → Booked: the form's booking rows (which the
+    // user sees and edits) are the source of truth, so nothing is auto-cancelled.
+    unblockCancelled = unblockSite(site, {
+      wasBlocked: beforeStatus === 'blocked',
+      user: req.user,
+      cancelCurrentBooking: targetStatus !== 'booked',
+    });
     // Live status/bookingInfo always get recomputed from the (possibly just-edited)
     // bookings array against today's date — never taken at face value from the toggle.
     resolveSiteStatus(site);
@@ -498,6 +544,9 @@ const updateSite = asyncHandler(async (req, res) => {
   const changedAt = nowIST();
   await logFieldChanges(site._id, before, site.toObject(), req.user._id, changedAt);
   await logBookingChanges(site._id, beforeBookings, site.bookings, req.user._id, changedAt);
+  for (const b of unblockCancelled) {
+    await logBookingCancellation(site._id, b, req.user._id, changedAt);
+  }
   res.json({ ...site.toObject(), mediaCode: site.mediaId });
 });
 
@@ -528,7 +577,7 @@ const changeStatus = asyncHandler(async (req, res) => {
     throw new Error('Invalid media status');
   }
 
-  let cancelledBooking = null;
+  let cancelledBookings = [];
 
   if (mediaStatus === 'blocked') {
     if (!blockReason) {
@@ -539,6 +588,10 @@ const changeStatus = asyncHandler(async (req, res) => {
     site.mediaStatus = 'blocked';
     site.isActive = false;
   } else {
+    // Blocked → Booked/Available: unblock first and end the booking that was running when the
+    // site got blocked — "Available" then really means Available, and "Booked" uses only the
+    // new booking details entered now (no overlap with the interrupted booking).
+    cancelledBookings = unblockSite(site, { wasBlocked: beforeStatus === 'blocked', user: req.user });
     if (mediaStatus === 'booked') {
       try {
         upsertActiveBooking(site, bookingInfo, req.user._id);
@@ -560,7 +613,7 @@ const changeStatus = asyncHandler(async (req, res) => {
       if (activeBooking && activeBooking.status !== 'cancelled') {
         applyBookingCancellation(activeBooking, cancelReason, req.user);
         site.markModified('bookings');
-        cancelledBooking = activeBooking;
+        cancelledBookings.push(activeBooking);
       }
     }
     // Live status/bookingInfo are always recomputed from the (remaining valid) bookings array
@@ -582,8 +635,8 @@ const changeStatus = asyncHandler(async (req, res) => {
   const changedAt = nowIST();
   await logFieldChanges(site._id, before, site.toObject(), req.user._id, changedAt);
   await logBookingChanges(site._id, beforeBookings, site.bookings, req.user._id, changedAt);
-  if (cancelledBooking) {
-    await logBookingCancellation(site._id, cancelledBooking, req.user._id, changedAt);
+  for (const b of cancelledBookings) {
+    await logBookingCancellation(site._id, b, req.user._id, changedAt);
   }
   res.json({ ...site.toObject(), mediaCode: site.mediaId });
 });
@@ -655,12 +708,16 @@ const bulkChangeStatus = asyncHandler(async (req, res) => {
     const beforeBookings = before.bookings || [];
     const beforeStatus = before.mediaStatus;
     const beforeBookingId = before.bookingInfo?.bookingId;
+    let cancelledBookings = [];
 
     if (mediaStatus === 'blocked') {
       site.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
       site.mediaStatus = 'blocked';
       site.isActive = false;
     } else {
+      // Blocked → Booked/Available: unblock first and end the booking that was running when
+      // the site got blocked (nothing is saved if the new booking below is skipped).
+      cancelledBookings = unblockSite(site, { wasBlocked: beforeStatus === 'blocked', user: req.user });
       if (mediaStatus === 'booked') {
         try {
           upsertActiveBooking(site, bookingInfo, req.user._id);
@@ -682,6 +739,9 @@ const bulkChangeStatus = asyncHandler(async (req, res) => {
     const changedAt = nowIST();
     await logFieldChanges(site._id, before, site.toObject(), req.user._id, changedAt);
     await logBookingChanges(site._id, beforeBookings, site.bookings, req.user._id, changedAt);
+    for (const b of cancelledBookings) {
+      await logBookingCancellation(site._id, b, req.user._id, changedAt);
+    }
     results.push(site._id);
   }
   res.json({ updated: results.length, total: siteIds.length, skipped });
@@ -755,12 +815,24 @@ const bulkImport = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error('No records to import');
   }
+  // Latitude/Longitude are optional: blank, placeholder ("-", "NA") or out-of-range values are
+  // dropped so the site still imports without coordinates, instead of the whole row being
+  // rejected by the schema's min/max validators (insertMany would skip it silently).
+  const optionalCoord = (value, limit) => {
+    if (value === undefined || value === null) return undefined;
+    const n = Number(String(value).trim().replace(/°/g, ''));
+    return String(value).trim() !== '' && Number.isFinite(n) && Math.abs(n) <= limit ? n : undefined;
+  };
   const docs = records.map((r) => {
     const doc = {
       ...normalizeSiteBody(r),
       mediaStatus: r.mediaStatus || 'available',
       createdBy: req.user._id,
     };
+    doc.latitude = optionalCoord(doc.latitude, 90);
+    doc.longitude = optionalCoord(doc.longitude, 180);
+    if (doc.latitude === undefined) delete doc.latitude;
+    if (doc.longitude === undefined) delete doc.longitude;
     Site.applyComputedFields(doc);
     return doc;
   });
