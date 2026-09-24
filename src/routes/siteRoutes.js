@@ -49,13 +49,13 @@ const uploadFields = upload.fields([
   { name: 'file', maxCount: 1 },
 ]);
 
-router.post('/', authorize('admin', 'tl'), uploadFields, createSite);
-router.post('/upload-image', authorize('admin', 'tl'), uploadFields, uploadImage);
-router.post('/bulk-import', authorize('admin', 'tl'), bulkImport);
-router.patch('/bulk-status', authorize('admin', 'tl'), bulkChangeStatus);
-router.put('/:id', authorize('admin', 'tl'), uploadFields, updateSite);
-router.patch('/:id/status', authorize('admin', 'tl'), changeStatus);
-router.patch('/:id/bookings/:bookingId/cancel', authorize('admin', 'tl'), cancelBooking);
+router.post('/', authorize('admin', 'tl', 'user', 'bd'), uploadFields, createSite);
+router.post('/upload-image', authorize('admin', 'tl', 'user', 'bd'), uploadFields, uploadImage);
+router.post('/bulk-import', authorize('admin', 'tl', 'user'), bulkImport);
+router.patch('/bulk-status', authorize('admin', 'tl', 'bd'), bulkChangeStatus);
+router.put('/:id', authorize('admin', 'tl', 'user', 'bd'), uploadFields, updateSite);
+router.patch('/:id/status', authorize('admin', 'tl', 'user', 'bd'), changeStatus);
+router.patch('/:id/bookings/:bookingId/cancel', authorize('admin', 'tl', 'user', 'bd'), cancelBooking);
 // Deleting a site is admin-only — TL, BD and User roles cannot delete.
 router.delete('/:id', authorize('admin'), deleteSite);
 

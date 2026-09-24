@@ -2,7 +2,7 @@ const express = require('express');
 const { protect, authorize } = require('../middleware/auth');
 const upload = require('../middleware/upload');
 const makeTemplateController = require('../controllers/templateControllerFactory');
-const { savePptxTemplateFile } = require('../utils/templateStorage');
+const { savePptxTemplateFile, saveExcelTemplateFile } = require('../utils/templateStorage');
 const PPTTemplate = require('../models/PPTTemplate');
 const ExcelTemplate = require('../models/ExcelTemplate');
 
@@ -24,5 +24,5 @@ function buildRouter(Model, options = {}) {
 
 module.exports = {
   pptRouter: buildRouter(PPTTemplate, { fileHandler: savePptxTemplateFile }),
-  excelRouter: buildRouter(ExcelTemplate),
+  excelRouter: buildRouter(ExcelTemplate, { fileHandler: saveExcelTemplateFile }),
 };

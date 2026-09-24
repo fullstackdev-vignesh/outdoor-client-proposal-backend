@@ -9,6 +9,14 @@ async function saveTemplateFile(file) {
   return uploadFile(file.buffer, file.originalname, mime, 'outdoor-proposal/proposal-templates');
 }
 
+async function saveExcelTemplateFile(file) {
+  if (!file || !/\.(xlsx|xls)$/i.test(file.originalname || '')) {
+    throw new Error('Only .xlsx or .xls files are allowed for Excel templates');
+  }
+  const mime = file.mimetype || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  return uploadFile(file.buffer, file.originalname, mime, 'outdoor-proposal/proposal-templates');
+}
+
 function safeFolderName(name) {
   return String(name || '').trim().replace(/[\\/:*?"<>|]/g, '-') || 'template';
 }
@@ -28,4 +36,4 @@ async function savePptxTemplateFile(file, body) {
   return `/reference/${folderName}/${folderName}.pptx`;
 }
 
-module.exports = { saveTemplateFile, savePptxTemplateFile };
+module.exports = { saveTemplateFile, saveExcelTemplateFile, savePptxTemplateFile };
