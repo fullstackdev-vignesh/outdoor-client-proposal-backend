@@ -86,9 +86,10 @@ Shown after a proposal is created (`/proposals/[id]`). Key section — **Generat
 - **"With Location" button** → `generatePpt('with')` → same endpoint with `{ locationMode: 'with'
   }`.
 - Both re-`GET /proposals/:id` on success to refresh `generatedPptUrl`, and a "Download PPT" link
-  appears once that URL exists. Re-clicking either button **regenerates and overwrites**
-  `generatedPptUrl` (no separate "with" vs "without" file is kept — only the latest generation
-  survives).
+  appears once that URL exists. Each mode is stored separately: `generatedPptWithLocationUrl` /
+  `generatedPptWithoutLocationUrl`, uploaded under distinct file names (`...-WithLocation.pptx` /
+  `...-WithoutLocation.pptx`), so regenerating one mode never overwrites the other.
+  `generatedPptUrl` still holds the most recent generation of either mode.
 - "Generate Excel / Refresh" is a separate, unrelated button (no location mode).
 
 ### 2.3 Site Info management (master data for the "Site Information" card)

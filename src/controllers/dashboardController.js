@@ -34,6 +34,7 @@ async function getRecentBookings(limit = 5) {
             status: b.status || 'booked',
             amount: b.amount || 0,
             createdAt: b.createdAt || b.updatedAt || new Date(0),
+            updatedAt: b.updatedAt || b.createdAt || new Date(0),
           });
           existingBookingIds.add(key);
         }
@@ -64,6 +65,7 @@ async function getRecentBookings(limit = 5) {
         status: h.status,
         amount: h.bookingSnapshot?.amount || 0,
         createdAt: h.changedAt || new Date(0),
+        updatedAt: h.changedAt || new Date(0),
       });
       existingBookingIds.add(key);
     }
@@ -72,7 +74,7 @@ async function getRecentBookings(limit = 5) {
   // 3. Fetch from Booking collection if legacy bookings exist
   const legacyBookings = await Booking.find()
     .populate('client', 'name')
-    .sort({ createdAt: -1 })
+    .sort({ updatedAt: -1, _id: -1 })
     .limit(limit)
     .lean();
 
@@ -91,13 +93,14 @@ async function getRecentBookings(limit = 5) {
         status: lb.status || 'active',
         amount: lb.totalAmount || lb.amount || 0,
         createdAt: lb.createdAt || new Date(0),
+        updatedAt: lb.updatedAt || lb.createdAt || new Date(0),
       });
       existingBookingIds.add(key);
     }
   }
 
-  // Sort by createdAt descending (newest / most recent first)
-  allBookings.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  // Sort by updatedAt descending (most recently changed first)
+  allBookings.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 
   return allBookings.slice(0, limit);
 }
@@ -132,11 +135,11 @@ const getDashboardStats = asyncHandler(async (req, res) => {
     Site.countDocuments({ mediaStatus: 'blocked' }),
     Client.countDocuments(),
     Proposal.countDocuments(),
-    Site.find().sort({ createdAt: -1 }).limit(5),
-    Client.find().sort({ createdAt: -1 }).limit(5),
+    Site.find().sort({ updatedAt: -1, _id: -1 }).limit(5),
+    Client.find().sort({ updatedAt: -1, _id: -1 }).limit(5),
     getRecentBookings(5),
-    Proposal.find().populate('client', 'name').sort({ createdAt: -1 }).limit(5),
-    User.find().sort({ createdAt: -1 }).limit(5),
+    Proposal.find().populate('client', 'name').sort({ updatedAt: -1, _id: -1 }).limit(5),
+    User.find().sort({ updatedAt: -1, _id: -1 }).limit(5),
   ]);
 
   const siteBookingsCountAgg = await Site.aggregate([

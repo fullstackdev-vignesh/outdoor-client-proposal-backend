@@ -20,7 +20,7 @@ const getBookings = asyncHandler(async (req, res) => {
     Booking.find(filter)
       .populate('client', 'name')
       .populate('sites', 'mediaName mediaId city state')
-      .sort({ createdAt: -1 })
+      .sort({ updatedAt: -1, _id: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
     Booking.countDocuments(filter),

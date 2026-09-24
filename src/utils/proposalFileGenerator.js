@@ -140,8 +140,12 @@ function buildGeneratedFileName(proposal, client, now, ext) {
   return `${clientNameSafe}-${dd}-${monthWords}-${yyyy}-${proposal.proposalId}.${ext}`;
 }
 
-function buildGeneratedPptFileName(proposal, client, now) {
-  return buildGeneratedFileName(proposal, client, now, 'pptx');
+// The location mode is part of the file name so the "with" and "without" decks are stored as
+// separate cloud objects — otherwise generating one mode overwrites the other's file.
+function buildGeneratedPptFileName(proposal, client, now, locationMode = 'with') {
+  const suffix = locationMode === 'without' ? 'WithoutLocation' : 'WithLocation';
+  const base = buildGeneratedFileName(proposal, client, now, 'pptx').replace(/\.pptx$/, '');
+  return `${base}-${suffix}.pptx`;
 }
 
 async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
@@ -299,7 +303,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
     const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
-    const fileName = buildGeneratedPptFileName(proposal, client, now);
+    const fileName = buildGeneratedPptFileName(proposal, client, now, locationMode);
 
     try {
       return await uploadFileToCloud(
@@ -447,7 +451,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
     const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
-    const fileName = buildGeneratedPptFileName(proposal, client, now);
+    const fileName = buildGeneratedPptFileName(proposal, client, now, locationMode);
 
     try {
       return await uploadFileToCloud(
@@ -550,7 +554,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
     const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
-    const fileName = buildGeneratedPptFileName(proposal, client, now);
+    const fileName = buildGeneratedPptFileName(proposal, client, now, locationMode);
 
     try {
       return await uploadFileToCloud(
@@ -647,7 +651,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
     const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
-    const fileName = buildGeneratedPptFileName(proposal, client, now);
+    const fileName = buildGeneratedPptFileName(proposal, client, now, locationMode);
 
     try {
       return await uploadFileToCloud(
@@ -791,7 +795,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
     const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
-    const fileName = buildGeneratedPptFileName(proposal, client, now);
+    const fileName = buildGeneratedPptFileName(proposal, client, now, locationMode);
 
     try {
       return await uploadFileToCloud(
@@ -915,7 +919,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
     const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
-    const fileName = buildGeneratedPptFileName(proposal, client, now);
+    const fileName = buildGeneratedPptFileName(proposal, client, now, locationMode);
 
     try {
       return await uploadFileToCloud(
@@ -1038,7 +1042,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
     const clientNameSafe = sanitizePathSegment(client.name);
     const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : now).toISOString().slice(0, 10);
     const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
-    const fileName = buildGeneratedPptFileName(proposal, client, now);
+    const fileName = buildGeneratedPptFileName(proposal, client, now, locationMode);
 
     try {
       return await uploadFileToCloud(
@@ -1162,7 +1166,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
   const clientNameSafe = sanitizePathSegment(client.name);
   const dateSegment = (proposal.createdAt ? new Date(proposal.createdAt) : new Date()).toISOString().slice(0, 10);
   const folder = `outdoor-proposal/${clientNameSafe}-${dateSegment}`;
-  const fileName = buildGeneratedPptFileName(proposal, client, now);
+  const fileName = buildGeneratedPptFileName(proposal, client, now, locationMode);
 
   let pptUrl;
   try {

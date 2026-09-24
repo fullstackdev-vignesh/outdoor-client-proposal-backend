@@ -18,7 +18,7 @@ const getUsers = asyncHandler(async (req, res) => {
     filter.assignedTL = req.user._id;
   }
 
-  const users = await User.find(filter).sort({ createdAt: -1 });
+  const users = await User.find(filter).sort({ updatedAt: -1, _id: -1 });
   res.json(users);
 });
 

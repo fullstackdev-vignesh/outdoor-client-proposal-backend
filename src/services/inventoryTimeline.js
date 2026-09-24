@@ -14,7 +14,7 @@ async function recordStatusPeriod({ site, previousStatus, source, userId }) {
   const effectiveTo = newStatus === 'booked' && site.bookingInfo?.endDate ? new Date(site.bookingInfo.endDate) : null;
 
   // Close whatever period was previously open for this site (no-op for a brand-new site).
-  await InventoryHistory.updateMany({ site: site._id, effectiveTo: null }, { $set: { effectiveTo: effectiveFrom } });
+  await InventoryHistory.updateMany({ site: site._id, effectiveTo: null }, { $set: { effectiveTo: effectiveFrom, updatedAt: now } });
 
   const doc = {
     site: site._id,
@@ -30,6 +30,7 @@ async function recordStatusPeriod({ site, previousStatus, source, userId }) {
     effectiveFrom,
     effectiveTo,
     changedAt: now,
+    updatedAt: now,
     changedBy: userId,
     source,
   };
@@ -106,8 +107,37 @@ async function syncBookingTimelineRecords(site, userId, source) {
         cancelledByRole: b.cancelledByRole,
       };
     }
+    // This runs on every save, so skip rows whose data is unchanged — otherwise every booking of
+    // a site would get a fresh changedAt/updatedAt and jump to the top of the Timeline list.
+    const existing = await InventoryHistory.findOne({ site: site._id, bookingId: b.bookingId }).lean();
+    if (existing && !bookingRowChanged(existing, update)) continue;
+    update.updatedAt = now;
     await InventoryHistory.findOneAndUpdate({ site: site._id, bookingId: b.bookingId }, { $set: update }, { upsert: true });
   }
+}
+
+// Compares only the data fields of a booking Timeline row (not who/when/source metadata).
+const BOOKING_ROW_FIELDS = ['mediaId', 'mediaType', 'state', 'city', 'mediaImage', 'siteOwner', 'status', 'isActive', 'effectiveFrom', 'effectiveTo'];
+const BOOKING_SNAPSHOT_FIELDS = ['customerType', 'client', 'customerName', 'startDate', 'endDate', 'durationDays', 'monthlyTotalCost', 'amount'];
+const CANCELLATION_SNAPSHOT_FIELDS = ['reason', 'cancelledAt', 'cancelledByName', 'cancelledByRole'];
+
+// Dates compare by time value, ObjectIds by hex string, and empty values as equal.
+function normalizeValue(v) {
+  if (v === undefined || v === null || v === '') return null;
+  if (v instanceof Date) return v.getTime();
+  return String(v);
+}
+
+function fieldsDiffer(a, b, fields) {
+  return fields.some((f) => normalizeValue(a?.[f]) !== normalizeValue(b?.[f]));
+}
+
+function bookingRowChanged(existing, update) {
+  return (
+    fieldsDiffer(existing, update, BOOKING_ROW_FIELDS) ||
+    fieldsDiffer(existing.bookingSnapshot, update.bookingSnapshot, BOOKING_SNAPSHOT_FIELDS) ||
+    Boolean(update.cancellationSnapshot && fieldsDiffer(existing.cancellationSnapshot, update.cancellationSnapshot, CANCELLATION_SNAPSHOT_FIELDS))
+  );
 }
 
 // Dynamic per-booking lifecycle for Timeline display — kept separate from the stored

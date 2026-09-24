@@ -27,6 +27,10 @@ const inventoryHistorySchema = new mongoose.Schema({
 
   // When the user actually performed the update (distinct from the effective period).
   changedAt: { type: Date, default: nowIST },
+  // Last time this row's data actually changed (created, period closed, booking edited or
+  // cancelled). Drives the Timeline list order. Older rows may lack it — readers fall back to
+  // changedAt.
+  updatedAt: { type: Date, default: nowIST, index: true },
   changedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   source: { type: String, enum: ['sites', 'inventory'], required: true },
 

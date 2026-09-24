@@ -137,22 +137,98 @@ function applyComputedFields(doc) {
   if (doc.totalCost !== totalCost) doc.totalCost = totalCost;
 }
 
+// Derived from other master fields (width/height, monthlyAmount/printingCost/mountingCost), so a
+// recalculation alone is never treated as a user edit.
+const DERIVED_FIELDS = ['autoSize', 'totalCost'];
+const MASTER_COMPARE_FIELDS = MASTER_FIELDS.filter((f) => !DERIVED_FIELDS.includes(f));
+
+// Audit metadata that controllers rewrite on every save (e.g. every booking gets a fresh
+// updatedAt/updatedBy when the Edit Site form resubmits the bookings array) — not real data.
+const IGNORED_NESTED_KEYS = new Set(['createdAt', 'updatedAt', 'createdBy', 'updatedBy', 'bookedBy', 'blockedDate', 'blockedBy', '_id']);
+
+// Order-independent, type-normalized serialization: Dates by time value, ObjectIds by hex,
+// and null/undefined/'' all treated as "empty".
+function canonical(value, nested = false) {
+  if (value === undefined || value === null || value === '') return null;
+  if (value instanceof Date) return value.getTime();
+  if (value && typeof value.toHexString === 'function') return value.toHexString();
+  if (value && typeof value.toObject === 'function') value = value.toObject({ depopulate: true });
+  if (Array.isArray(value)) return value.map((v) => canonical(v, true));
+  if (typeof value === 'object') {
+    const out = {};
+    for (const key of Object.keys(value).sort()) {
+      if (nested && IGNORED_NESTED_KEYS.has(key)) continue;
+      const v = canonical(value[key], true);
+      if (v !== null) out[key] = v;
+    }
+    return Object.keys(out).length ? out : null;
+  }
+  return value;
+}
+
+function snapshot(doc, fields) {
+  return JSON.stringify(fields.map((f) => canonical(doc.get(f), true)));
+}
+
+// Remember the values as loaded from the DB so pre('save') can tell what really changed —
+// Mongoose's isModified() reports a change whenever a subdocument/array is reassigned, even
+// with identical content (resolveSiteStatus reassigns bookingInfo/bookings on every call).
+siteSchema.post('init', function () {
+  this.$locals.masterSnapshot = snapshot(this, MASTER_COMPARE_FIELDS);
+  this.$locals.inventorySnapshot = snapshot(this, INVENTORY_FIELDS);
+});
+
 // Timestamp rule: driven by WHAT DATA changed, never by which page/endpoint was used.
+// A Site edit bumps only `updatedAt`; an Inventory/status/booking change bumps only
+// `inventoryUpdatedAt`; a single save touching both groups bumps both.
 siteSchema.pre('save', function (next) {
   const now = nowIST();
   if (!this.createdAt) this.createdAt = now;
   applyComputedFields(this);
 
-  const masterChanged = this.isNew || MASTER_FIELDS.some((f) => this.isModified(f));
-  const inventoryChanged = this.isNew || INVENTORY_FIELDS.some((f) => this.isModified(f)) || this.$locals.forceInventoryTouch;
+  const { masterSnapshot, inventorySnapshot } = this.$locals;
+  const masterChanged =
+    this.isNew || masterSnapshot === undefined || snapshot(this, MASTER_COMPARE_FIELDS) !== masterSnapshot;
+  const inventoryChanged =
+    this.isNew ||
+    inventorySnapshot === undefined ||
+    snapshot(this, INVENTORY_FIELDS) !== inventorySnapshot ||
+    this.$locals.forceInventoryTouch;
 
   if (masterChanged) this.updatedAt = now;
   if (inventoryChanged) this.inventoryUpdatedAt = now;
   next();
 });
 
+// Refresh the baseline after a save so a second save of the same document compares against
+// what is now in the DB.
+siteSchema.post('save', function () {
+  this.$locals.masterSnapshot = snapshot(this, MASTER_COMPARE_FIELDS);
+  this.$locals.inventorySnapshot = snapshot(this, INVENTORY_FIELDS);
+  this.$locals.forceInventoryTouch = false;
+});
+
+// Query-style updates: bump whichever timestamp matches the fields being written (e.g. the
+// legacy Booking API only sets mediaStatus/bookingInfo, which is an inventory change).
+function touchedRootFields(update) {
+  const fields = new Set();
+  for (const [key, val] of Object.entries(update || {})) {
+    if (key.startsWith('$')) {
+      if (val && typeof val === 'object') Object.keys(val).forEach((p) => fields.add(p.split('.')[0]));
+    } else {
+      fields.add(key.split('.')[0]);
+    }
+  }
+  return fields;
+}
+
 siteSchema.pre(['updateOne', 'findOneAndUpdate', 'updateMany'], function (next) {
-  this.set({ updatedAt: nowIST() });
+  const fields = touchedRootFields(this.getUpdate());
+  const now = nowIST();
+  const set = {};
+  if (MASTER_FIELDS.some((f) => fields.has(f))) set.updatedAt = now;
+  if (INVENTORY_FIELDS.some((f) => fields.has(f))) set.inventoryUpdatedAt = now;
+  if (Object.keys(set).length) this.set(set);
   next();
 });
 

@@ -37,7 +37,7 @@ const getProposals = asyncHandler(async (req, res) => {
       .populate('client', 'name')
       .populate('pptTemplate', 'name')
       .populate('excelTemplate', 'name')
-      .sort({ createdAt: -1 })
+      .sort({ updatedAt: -1, _id: -1 })
       .skip((page - 1) * limit)
       .limit(limit),
     Proposal.countDocuments(filter),
@@ -135,11 +135,16 @@ const duplicateProposal = asyncHandler(async (req, res) => {
     throw new Error('Proposal not found');
   }
   delete source._id;
+  // A copy is a new record — don't inherit the source's timestamps, or it would sort as old.
+  delete source.createdAt;
+  delete source.updatedAt;
   const copy = await Proposal.create({
     ...source,
     proposalId: genProposalId(),
     status: 'draft',
     generatedPptUrl: undefined,
+    generatedPptWithLocationUrl: undefined,
+    generatedPptWithoutLocationUrl: undefined,
     generatedExcelUrl: undefined,
     createdBy: req.user._id,
   });

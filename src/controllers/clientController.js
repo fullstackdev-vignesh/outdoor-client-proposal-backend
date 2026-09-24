@@ -17,7 +17,7 @@ const getClients = asyncHandler(async (req, res) => {
   }
   if (req.query.customerType) filter.customerType = req.query.customerType;
   const [items, total] = await Promise.all([
-    Client.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit),
+    Client.find(filter).sort({ updatedAt: -1, _id: -1 }).skip((page - 1) * limit).limit(limit),
     Client.countDocuments(filter),
   ]);
   res.json({ items, total, page, pages: Math.ceil(total / limit) });
@@ -30,8 +30,8 @@ const getClient = asyncHandler(async (req, res) => {
     throw new Error('Client not found');
   }
   const [bookings, proposals, siteCount] = await Promise.all([
-    Booking.find({ client: client._id }).sort({ createdAt: -1 }),
-    Proposal.find({ client: client._id }).sort({ createdAt: -1 }),
+    Booking.find({ client: client._id }).sort({ updatedAt: -1, _id: -1 }),
+    Proposal.find({ client: client._id }).sort({ updatedAt: -1, _id: -1 }),
     Site.countDocuments({ 'bookingInfo.client': client._id }),
   ]);
   res.json({ client, bookings, proposals, siteCount });

@@ -141,16 +141,20 @@ const buildFilter = (query) => {
   return filter;
 };
 
+// Each page orders by its own timestamp: the Inventory page passes `sortBy=inventory` (latest
+// status/booking/block change first); everything else — the Sites page — orders by the latest
+// master-data edit (`updatedAt`). The two never mix.
+function siteListSort(query) {
+  return query.sortBy === 'inventory' ? { inventoryUpdatedAt: -1, _id: -1 } : { updatedAt: -1, _id: -1 };
+}
+
 const getSites = asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(100, Number(req.query.limit) || 20);
   const filter = buildFilter(req.query);
 
   const [items, total] = await Promise.all([
-    Site.find(filter)
-      .sort({ updatedAt: -1, _id: 1 })
-      .skip((page - 1) * limit)
-      .limit(limit),
+    Site.find(filter).sort(siteListSort(req.query)).skip((page - 1) * limit).limit(limit),
     Site.countDocuments(filter),
   ]);
 
@@ -163,7 +167,7 @@ const getAvailableSites = asyncHandler(async (req, res) => {
   const limit = Math.min(100, Number(req.query.limit) || 20);
 
   const [items, total] = await Promise.all([
-    Site.find(filter).sort({ updatedAt: -1, _id: 1 }).skip((page - 1) * limit).limit(limit),
+    Site.find(filter).sort(siteListSort(req.query)).skip((page - 1) * limit).limit(limit),
     Site.countDocuments(filter),
   ]);
 
@@ -448,7 +452,15 @@ const updateSite = asyncHandler(async (req, res) => {
       res.status(400);
       throw new Error('Block reason is required');
     }
-    site.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
+    // Re-saving an already-blocked site from Edit Site keeps its original block record (date/by)
+    // unless the reason or notes were actually changed.
+    const sameBlock =
+      before.mediaStatus === 'blocked' &&
+      before.blockInfo?.reason === blockReason &&
+      (before.blockInfo?.notes || '') === (blockNotes || '');
+    if (!sameBlock) {
+      site.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
+    }
     site.isActive = false;
   } else {
     const bookingList = Array.isArray(incomingBookings) ? incomingBookings : bookingInfo ? [bookingInfo] : null;
@@ -689,17 +701,28 @@ const getSiteTimeline = asyncHandler(async (req, res) => {
   res.json(timeline.map((t) => ({ ...t.toObject(), bookingLifecycle: computeBookingLifecycle(t) })));
 });
 
+// Timeline rows are listed by when they were last updated (most recent first). Rows written
+// before `updatedAt` existed fall back to `changedAt`.
+async function findTimelineByLatestUpdate(filter, { skip = 0, limit } = {}) {
+  const pipeline = [
+    { $match: filter },
+    { $addFields: { _latestUpdateAt: { $ifNull: ['$updatedAt', '$changedAt'] } } },
+    { $sort: { _latestUpdateAt: -1, _id: -1 } },
+  ];
+  if (skip) pipeline.push({ $skip: skip });
+  if (limit) pipeline.push({ $limit: limit });
+  pipeline.push({ $project: { _latestUpdateAt: 0 } });
+  const docs = (await InventoryHistory.aggregate(pipeline)).map((d) => InventoryHistory.hydrate(d));
+  return InventoryHistory.populate(docs, { path: 'changedBy', select: 'name' });
+}
+
 const getTimeline = asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(100, Number(req.query.limit) || 20);
   const filter = buildOverlapFilter(req.query);
 
   const [rows, total, distinctSites] = await Promise.all([
-    InventoryHistory.find(filter)
-      .sort({ effectiveFrom: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .populate('changedBy', 'name'),
+    findTimelineByLatestUpdate(filter, { skip: (page - 1) * limit, limit }),
     InventoryHistory.countDocuments(filter),
     InventoryHistory.distinct('site', filter),
   ]);
@@ -793,7 +816,7 @@ const ALL_BORDERS = { top: THIN_BORDER, left: THIN_BORDER, bottom: THIN_BORDER, 
 
 const exportSites = asyncHandler(async (req, res) => {
   const filter = buildFilter(req.query);
-  const sites = await Site.find(filter).sort({ createdAt: -1 });
+  const sites = await Site.find(filter).sort(siteListSort(req.query));
 
   const now = nowIST();
   const pad = (n) => String(n).padStart(2, '0');
@@ -916,7 +939,7 @@ const TIMELINE_EXPORT_COLUMNS = [
 const exportTimeline = asyncHandler(async (req, res) => {
   const filter = buildOverlapFilter(req.query);
   const [records, distinctSites] = await Promise.all([
-    InventoryHistory.find(filter).sort({ effectiveFrom: -1 }).populate('changedBy', 'name'),
+    findTimelineByLatestUpdate(filter),
     InventoryHistory.distinct('site', filter),
   ]);
 

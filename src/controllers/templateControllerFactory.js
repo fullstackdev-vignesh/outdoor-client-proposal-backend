@@ -7,7 +7,7 @@ function makeTemplateController(Model, options = {}) {
     const filter = {};
     if (req.query.status) filter.status = req.query.status;
     if (req.query.search) filter.name = new RegExp(req.query.search, 'i');
-    const items = await Model.find(filter).sort({ createdAt: -1 });
+    const items = await Model.find(filter).sort({ updatedAt: -1, _id: -1 });
     res.json(items);
   });
 

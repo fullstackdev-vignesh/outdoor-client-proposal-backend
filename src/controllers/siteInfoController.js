@@ -6,7 +6,7 @@ const getSiteInfos = asyncHandler(async (req, res) => {
   if (req.query.search) {
     filter.title = new RegExp(req.query.search, 'i');
   }
-  const items = await SiteInfo.find(filter).sort({ createdAt: -1 });
+  const items = await SiteInfo.find(filter).sort({ updatedAt: -1, _id: -1 });
   res.json(items);
 });
 
