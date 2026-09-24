@@ -123,12 +123,16 @@ function computeBookingLifecycle(item) {
   return 'active';
 }
 
+function escapeRegex(text) {
+  return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+}
+
 // Period-overlap filter: a history record is included if its period intersects [from, to].
 // An open-ended record (effectiveTo === null) is treated as ongoing until now.
 function buildOverlapFilter(query) {
   const filter = {};
-  if (query.state) filter.state = query.state;
-  if (query.city) filter.city = query.city;
+  if (query.state) filter.state = new RegExp(`^${escapeRegex(query.state.trim())}$`, 'i');
+  if (query.city) filter.city = new RegExp(escapeRegex(query.city.trim()), 'i');
   if (query.siteOwner) filter.siteOwner = query.siteOwner;
   if (query.mediaStatus) filter.status = query.mediaStatus;
   if (query.isActive !== undefined && query.isActive !== '') filter.isActive = query.isActive === 'true';

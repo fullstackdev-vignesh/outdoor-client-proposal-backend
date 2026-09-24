@@ -21,12 +21,17 @@ const {
   getTimeline,
   getTimelineSummary,
   exportTimeline,
+  getStates,
+  getCities,
 } = require('../controllers/siteController');
 
 const router = express.Router();
 
 router.use(protect);
 
+router.get('/states', getStates);
+router.get('/states/:state/cities', getCities);
+router.get('/cities', getCities);
 router.get('/available', getAvailableSites);
 router.get('/summary', getSummary);
 router.get('/owners', getSiteOwners);
