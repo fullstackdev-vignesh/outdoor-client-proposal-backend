@@ -16,6 +16,7 @@ const clientSchema = new mongoose.Schema(
     // Percentage (e.g. 18 means 18%), used by Excel generation's Adinn dynamic fee columns —
     // not a GST registration number.
     gst: { type: Number, min: 0, max: 100 },
+    clientLocationPinImage: { type: String, default: null },
     vendorName: { type: String, trim: true },
     vendorCost: { type: Number, min: 0 },
     notes: String,

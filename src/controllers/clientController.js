@@ -1,8 +1,38 @@
+const path = require('path');
 const asyncHandler = require('express-async-handler');
 const Client = require('../models/Client');
 const Site = require('../models/Site');
 const Booking = require('../models/Booking');
 const Proposal = require('../models/Proposal');
+const { uploadFile } = require('../utils/storageService');
+
+const ALLOWED_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+const ALLOWED_IMAGE_MIMES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/pjpeg']);
+
+function validateImageFile(file) {
+  if (!file) return null;
+  const ext = path.extname(file.originalname || '').toLowerCase();
+  const mime = (file.mimetype || '').toLowerCase();
+
+  const isExtValid = ALLOWED_IMAGE_EXTS.has(ext);
+  const isMimeValid = ALLOWED_IMAGE_MIMES.has(mime) || mime.startsWith('image/');
+
+  if (!isExtValid || !isMimeValid) {
+    return 'Only image files are allowed for clientLocationPinImage';
+  }
+  return null;
+}
+
+function extractUploadedFile(req, fieldName = 'clientLocationPinImage') {
+  if (req.file && req.file.fieldname === fieldName) {
+    return req.file;
+  }
+  if (req.files && req.files[fieldName]) {
+    const list = req.files[fieldName];
+    return Array.isArray(list) ? list[0] : list;
+  }
+  return null;
+}
 
 const getClients = asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
@@ -69,12 +99,37 @@ function validateClientPayload(body, { requireGeo = false } = {}) {
 }
 
 const createClient = asyncHandler(async (req, res) => {
+  const file = extractUploadedFile(req, 'clientLocationPinImage');
+
+  if (file) {
+    const fileError = validateImageFile(file);
+    if (fileError) {
+      return res.status(400).json({
+        success: false,
+        message: fileError,
+      });
+    }
+  }
+
   const errors = validateClientPayload(req.body, { requireGeo: true });
   if (errors.length) {
-    res.status(400);
-    throw new Error(errors.join('; '));
+    return res.status(400).json({
+      success: false,
+      message: errors.join('; '),
+    });
   }
-  const client = await Client.create({ ...req.body, createdBy: req.user._id });
+
+  let imageUrl = null;
+  if (file) {
+    imageUrl = await uploadFile(file.buffer, file.originalname, file.mimetype, 'outdoor-proposal/clientLocationPinImage');
+  }
+
+  const client = await Client.create({
+    ...req.body,
+    clientLocationPinImage: imageUrl || req.body.clientLocationPinImage || null,
+    createdBy: req.user._id,
+  });
+
   res.status(201).json(client);
 });
 
@@ -84,13 +139,44 @@ const updateClient = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error('Client not found');
   }
+
+  const file = extractUploadedFile(req, 'clientLocationPinImage');
+
+  if (file) {
+    const fileError = validateImageFile(file);
+    if (fileError) {
+      return res.status(400).json({
+        success: false,
+        message: fileError,
+      });
+    }
+  }
+
   const errors = validateClientPayload({ ...client.toObject(), ...req.body });
   if (errors.length) {
-    res.status(400);
-    throw new Error(errors.join('; '));
+    return res.status(400).json({
+      success: false,
+      message: errors.join('; '),
+    });
   }
-  Object.assign(client, req.body);
+
+  const updateData = { ...req.body };
+
+  if (file) {
+    const newUrl = await uploadFile(file.buffer, file.originalname, file.mimetype, 'outdoor-proposal/clientLocationPinImage');
+    updateData.clientLocationPinImage = newUrl;
+  } else if (
+    req.body.clientLocationPinImage === '' ||
+    req.body.clientLocationPinImage === 'null' ||
+    req.body.removeClientLocationPinImage === 'true' ||
+    req.body.removeClientLocationPinImage === true
+  ) {
+    updateData.clientLocationPinImage = null;
+  }
+
+  Object.assign(client, updateData);
   await client.save();
+
   res.json(client);
 });
 

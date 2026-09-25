@@ -90,6 +90,7 @@ async function fetchRouteMap(client, site, box) {
     toLng: tLng,
     width,
     height,
+    clientLocationPinImage: client?.clientLocationPinImage,
   });
   if (!result) return { mapImage: null, routeLabel: null };
   const routeLabel = [result.durationText, result.distanceText].filter(Boolean).join(' • ') || null;
@@ -1134,6 +1135,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
           fromLng: client.longitude,
           toLat: site.latitude,
           toLng: site.longitude,
+          clientLocationPinImage: client?.clientLocationPinImage,
         });
         if (mapResult) {
           const mapBase = await tpl.cloneSlide(

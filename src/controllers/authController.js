@@ -5,8 +5,8 @@ const generateToken = require('../utils/generateToken');
 
 const STAFF_REGISTER_PASSWORD = process.env.STAFF_REGISTER_PASSWORD || 'Adinn@123';
 const TEAMHEAD_REGISTER_PASSWORD = process.env.TEAMHEAD_REGISTER_PASSWORD || 'Adinn@1234';
-const OWNER_REGISTER_PASSWORD = process.env.OWNER_REGISTER_PASSWORD || process.env.CMD_REGISTER_PASSWORD || 'Adinn@12345';
-const ADMIN_REGISTER_PASSWORD = process.env.ADMIN_REGISTER_PASSWORD || OWNER_REGISTER_PASSWORD || 'Adinn@12345';
+const BD_REGISTER_PASSWORD = process.env.BD_REGISTER_PASSWORD  || 'Adinn@12345';
+const ADMIN_REGISTER_PASSWORD = process.env.ADMIN_REGISTER_PASSWORD || 'Adinn@123456';
 
 function mapUserTypeToRole(userType) {
   const typeNum = Number(userType);
@@ -80,10 +80,10 @@ const register = asyncHandler(async (req, res) => {
   } else if (role === 'tl' && registerPassword !== TEAMHEAD_REGISTER_PASSWORD) {
     res.status(400);
     throw new Error('Invalid TL registration password');
-  } else if (role === 'bd' && registerPassword !== OWNER_REGISTER_PASSWORD && registerPassword !== STAFF_REGISTER_PASSWORD) {
+  } else if (role === 'bd' && registerPassword !== BD_REGISTER_PASSWORD) {
     res.status(400);
     throw new Error('Invalid BD registration password');
-  } else if (role === 'admin' && registerPassword !== ADMIN_REGISTER_PASSWORD && registerPassword !== OWNER_REGISTER_PASSWORD) {
+  } else if (role === 'admin' && registerPassword !== ADMIN_REGISTER_PASSWORD) {
     res.status(400);
     throw new Error('Invalid Admin registration password');
   }
@@ -362,10 +362,10 @@ const forgotPinVerify = asyncHandler(async (req, res) => {
   } else if (targetRole === 'tl' && registerPassword !== TEAMHEAD_REGISTER_PASSWORD) {
     res.status(400);
     throw new Error('Invalid TL registration password');
-  } else if (targetRole === 'bd' && registerPassword !== OWNER_REGISTER_PASSWORD && registerPassword !== STAFF_REGISTER_PASSWORD) {
+  } else if (targetRole === 'bd' && registerPassword !== BD_REGISTER_PASSWORD) {
     res.status(400);
     throw new Error('Invalid BD registration password');
-  } else if (targetRole === 'admin' && registerPassword !== ADMIN_REGISTER_PASSWORD && registerPassword !== OWNER_REGISTER_PASSWORD) {
+  } else if (targetRole === 'admin' && registerPassword !== ADMIN_REGISTER_PASSWORD) {
     res.status(400);
     throw new Error('Invalid Admin registration password');
   }

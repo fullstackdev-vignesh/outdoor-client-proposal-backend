@@ -5,9 +5,11 @@ const { PNG } = require('pngjs');
 const GOOGLE_DIRECTIONS_URL = 'https://maps.googleapis.com/maps/api/directions/json';
 
 const ASSETS_DIR = path.join(__dirname, '..', '..', 'assets', 'map-pins');
+const BACKEND_ROOT = path.join(__dirname, '..', '..');
 
 let pinGreenCache = null;
 let pinRedCache = null;
+const customPinCache = new Map();
 
 function getPinIcons() {
   if (!pinGreenCache) {
@@ -23,6 +25,61 @@ function getPinIcons() {
     }
   }
   return { greenPin: pinGreenCache, redPin: pinRedCache };
+}
+
+async function loadCustomPinImage(clientLocationPinImage) {
+  if (!clientLocationPinImage || typeof clientLocationPinImage !== 'string' || !clientLocationPinImage.trim()) {
+    return null;
+  }
+
+  const imageUri = clientLocationPinImage.trim();
+  if (customPinCache.has(imageUri)) {
+    return customPinCache.get(imageUri);
+  }
+
+  try {
+    let buffer = null;
+
+    if (/^https?:\/\//i.test(imageUri)) {
+      const res = await fetch(imageUri);
+      if (res.ok) {
+        const ab = await res.arrayBuffer();
+        buffer = Buffer.from(ab);
+      }
+    } else {
+      const cleanPath = imageUri.replace(/^\//, '');
+      const absPath = path.join(BACKEND_ROOT, cleanPath);
+      if (fs.existsSync(absPath)) {
+        buffer = fs.readFileSync(absPath);
+      }
+    }
+
+    if (!buffer) return null;
+
+    let parsed = null;
+    try {
+      parsed = PNG.sync.read(buffer);
+    } catch {
+      try {
+        const jpeg = require('jpeg-js');
+        const rawJpeg = jpeg.decode(buffer, { useTolerant: true });
+        if (rawJpeg && rawJpeg.width && rawJpeg.height && rawJpeg.data) {
+          parsed = { width: rawJpeg.width, height: rawJpeg.height, data: rawJpeg.data };
+        }
+      } catch {
+        parsed = null;
+      }
+    }
+
+    if (parsed) {
+      customPinCache.set(imageUri, parsed);
+      return parsed;
+    }
+  } catch {
+    // Ignore error, fallback to default pin
+  }
+
+  return null;
 }
 
 function lonToX(lon, zoom) {
@@ -100,7 +157,7 @@ function overlayPinImage(canvas, iconPng, targetX, targetY, scale = 0.22) {
   }
 }
 
-async function renderRouteMapImage({ fromLat, fromLng, toLat, toLng, width = 640, height = 480 }) {
+async function renderRouteMapImage({ fromLat, fromLng, toLat, toLng, width = 640, height = 480, clientLocationPinImage = null }) {
   let routePoints = [];
   let distanceText = null;
   let durationText = null;
@@ -299,8 +356,12 @@ async function renderRouteMapImage({ fromLat, fromLng, toLat, toLng, width = 640
 
   const { greenPin, redPin } = getPinIcons();
 
-  // Draw ONLY pin_green at client location and pin_red_adinn at site location (no extra or last pins)
-  overlayPinImage(canvas, greenPin, clientPx.x, clientPx.y, 0.22);
+  const customClientPin = clientLocationPinImage ? await loadCustomPinImage(clientLocationPinImage) : null;
+  const clientPinToDraw = customClientPin || greenPin;
+  const clientPinScale = customClientPin && customClientPin.height ? 52 / customClientPin.height : 0.22;
+
+  // Draw client pin (custom or pin_green) at client location and pin_red_adinn at site location
+  overlayPinImage(canvas, clientPinToDraw, clientPx.x, clientPx.y, clientPinScale);
   overlayPinImage(canvas, redPin, sitePx.x, sitePx.y, 0.22);
 
   const buffer = PNG.sync.write(canvas);
@@ -310,10 +371,11 @@ async function renderRouteMapImage({ fromLat, fromLng, toLat, toLng, width = 640
 /**
  * Fetches or generates a route map image (PNG buffer) between two points, plus the route's
  * driving distance/duration text (e.g. "3.5 km", "4 mins").
- * Renders pin_green at client location and pin_red_adinn at site location with zoomed-out framing
- * so the full route and all pin markers are clearly visible inside the map image.
+ * Renders client pin (custom clientLocationPinImage if provided, otherwise pin_green) at client
+ * location and pin_red_adinn at site location with zoomed-out framing so the full route and all
+ * pin markers are clearly visible inside the map image.
  */
-async function getRouteMapBuffer({ fromLat, fromLng, toLat, toLng, width = 640, height = 480 }) {
+async function getRouteMapBuffer({ fromLat, fromLng, toLat, toLng, width = 640, height = 480, clientLocationPinImage = null }) {
   const fLat = Number(fromLat);
   const fLng = Number(fromLng);
   const tLat = Number(toLat);
@@ -338,7 +400,7 @@ async function getRouteMapBuffer({ fromLat, fromLng, toLat, toLng, width = 640, 
     return null;
   }
 
-  return renderRouteMapImage({ fromLat: fLat, fromLng: fLng, toLat: tLat, toLng: tLng, width, height });
+  return renderRouteMapImage({ fromLat: fLat, fromLng: fLng, toLat: tLat, toLng: tLng, width, height, clientLocationPinImage });
 }
 
 module.exports = { getRouteMapBuffer };
