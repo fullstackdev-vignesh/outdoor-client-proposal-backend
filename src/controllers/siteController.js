@@ -284,9 +284,16 @@ function normalizeSiteBody(body) {
       delete payload.bookings;
     }
   }
-  // Optional Site Info dropdown submits '' when left unselected — an empty string fails
-  // ObjectId casting, so treat it the same as "not provided".
-  if (payload.siteInfoId === '') delete payload.siteInfoId;
+  // Optional Site Info dropdown submits '' when left unselected or 'None' is chosen.
+  // Convert empty string / 'none' / 'null' to null so Mongoose sets siteInfoId = null in MongoDB.
+  if (
+    payload.siteInfoId === '' ||
+    payload.siteInfoId === 'none' ||
+    payload.siteInfoId === 'null' ||
+    payload.siteInfoId === null
+  ) {
+    payload.siteInfoId = null;
+  }
   return payload;
 }
 

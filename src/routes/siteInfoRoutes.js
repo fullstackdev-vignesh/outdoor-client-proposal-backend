@@ -16,6 +16,6 @@ router.get('/', getSiteInfos);
 router.get('/:id', getSiteInfo);
 router.post('/', createSiteInfo);
 router.put('/:id', updateSiteInfo);
-router.delete('/:id', authorize('admin', 'tl'), deleteSiteInfo);
+router.delete('/:id', authorize('admin', 'tl', 'user'), deleteSiteInfo);
 
 module.exports = router;

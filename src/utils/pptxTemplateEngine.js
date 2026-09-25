@@ -364,6 +364,45 @@ class PptxTemplate {
     return newBaseName;
   }
 
+  updateLocationHyperlink(slideXml, relsXml, locationUrl) {
+    if (!locationUrl) return { slideXml, relsXml };
+
+    const escapedUrl = xmlEscape(locationUrl);
+
+    // 1. Replace Target in any existing hyperlink Relationship element in relsXml
+    const hasHyperlinkRel = /Type="http:\/\/schemas\.openxmlformats\.org\/officeDocument\/2006\/relationships\/hyperlink"/i.test(relsXml);
+
+    if (hasHyperlinkRel) {
+      relsXml = relsXml
+        .replace(
+          /(<Relationship\b[^>]*?)\bTarget="[^"]*"([^>]*?Type="http:\/\/schemas\.openxmlformats\.org\/officeDocument\/2006\/relationships\/hyperlink"[^>]*\/>)/gi,
+          `$1Target="${escapedUrl}"$2`
+        )
+        .replace(
+          /(<Relationship\b[^>]*?Type="http:\/\/schemas\.openxmlformats\.org\/officeDocument\/2006\/relationships\/hyperlink"[^>]*?)\bTarget="[^"]*"([^>]*\/>)/gi,
+          `$1Target="${escapedUrl}"$2`
+        );
+    } else {
+      const relId = `rIdHlinkLoc${this._nextRelId++}`;
+      const newRel = `<Relationship Id="${relId}" Target="${escapedUrl}" TargetMode="External" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"/>`;
+      relsXml = relsXml.replace('</Relationships>', `${newRel}</Relationships>`);
+
+      if (!slideXml.includes('<a:hlinkClick')) {
+        slideXml = slideXml.replace(
+          /(<p:cNvPr\b[^>]*?name="(?:Freeform 28|Freeform \d+|Group \d+|[^"]*Pin[^"]*)"[^>]*?>)/gi,
+          `$1<a:hlinkClick r:id="${relId}" tooltip="${escapedUrl}"/>`
+        );
+      }
+    }
+
+    // 2. Update tooltips in slideXml if hlinkClick exists
+    if (slideXml.includes('<a:hlinkClick')) {
+      slideXml = slideXml.replace(/(<a:hlinkClick[^>]*tooltip=")[^"]*(")/gi, `$1${escapedUrl}$2`);
+    }
+
+    return { slideXml, relsXml };
+  }
+
   // adinn-new-template slide 4/5 cloning: exact text swaps, plus per-relationship-id image
   // replacement that also recomputes that shape's <a:fillRect> crop so the new photo covers
   // its existing box without stretching (aspect-fit "cover", not distort-to-fill).
@@ -386,6 +425,7 @@ class PptxTemplate {
       boxWidths = [],
       removeGroupNames = [],
       removeShapesAtOffset = [],
+      locationUrl,
     } = {}
   ) {
     const slidePath = `ppt/slides/${templateBaseName}.xml`;
@@ -393,6 +433,12 @@ class PptxTemplate {
 
     let slideXml = await this.readText(slidePath);
     let relsXml = await this.readText(relsPath);
+
+    if (locationUrl) {
+      const updated = this.updateLocationHyperlink(slideXml, relsXml, locationUrl);
+      slideXml = updated.slideXml;
+      relsXml = updated.relsXml;
+    }
 
     slideXml = removeRedHighlightShapes(slideXml);
 

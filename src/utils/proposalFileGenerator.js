@@ -270,6 +270,9 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
         images.push({ relId: 'rId3', ...mapImage, boxWidthEMU: 5775471, boxHeightEMU: 7076491, fitContain: true });
       }
 
+      const hasCoords = site.latitude != null && site.longitude != null && !isNaN(Number(site.latitude)) && !isNaN(Number(site.longitude));
+      const locationUrl = hasCoords ? `https://www.google.com/maps?q=${site.latitude},${site.longitude}` : null;
+
       const slideBase = await tpl.cloneAdinnSiteSlide(siteDetailTpl, {
         textReplacements: [['OMR Padur Nr. Hindustan College twds Solinganallur – 30x25', titleText]],
         images,
@@ -290,6 +293,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
                 text: 'Insert your map image here',
               }
             : undefined,
+        locationUrl,
       });
       if (mapImage && routeLabel) {
         const mapBox = { offX: 11739398, offY: 2105609, extCx: 5775471, extCy: 7076491 };
@@ -389,6 +393,9 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
         ]);
       }
 
+      const hasCoords = site.latitude != null && site.longitude != null && !isNaN(Number(site.latitude)) && !isNaN(Number(site.longitude));
+      const locationUrl = hasCoords ? `https://www.google.com/maps?q=${site.latitude},${site.longitude}` : null;
+
       const slide4Base = await tpl.cloneAdinnSiteSlide('slide4', {
         textReplacements,
         images: siteImage
@@ -403,6 +410,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
             ]
           : [],
         boxWidths: withLocation ? [] : DIRECT_CLIENT_BOX_WIDTHS,
+        locationUrl,
         // "With Location" removes the Site Info card outright (not just when the site has none),
         // since the whole Media Specifications side of the slide is hidden in that mode.
         removeGroupNames: withLocation || !siteInfo?.description ? ['Group 29'] : [],
@@ -498,6 +506,9 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
       const siteImage = await getImageBuffer(site.mediaImage);
       const titleReplacement = ['Periyanayakanpalayam bridge towards Mettupalayam 40x30', titleText];
 
+      const hasCoords = site.latitude != null && site.longitude != null && !isNaN(Number(site.latitude)) && !isNaN(Number(site.longitude));
+      const locationUrl = hasCoords ? `https://www.google.com/maps?q=${site.latitude},${site.longitude}` : null;
+
       if (!withLocation) {
         // Slide 4 — site specification: title, bordered site-photo box, media spec values.
         // Only the bordered foreground photo box (rId6) gets the site photo — the full-bleed
@@ -514,6 +525,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
           ],
           images: siteImage ? [{ relId: 'rId6', ...siteImage, boxWidthEMU: 11366193, boxHeightEMU: 7736815 }] : [],
           boxWidths: ADINN_MEDIA_SPEC_BOX_WIDTHS,
+          locationUrl,
         });
         siteSlideBaseNames.push(slide4Base);
         continue;
@@ -542,6 +554,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
         images: slide5Images,
         clearImageRelId: mapImage ? undefined : 'rId5',
         placeholderText: mapImage ? undefined : { ...mapBoxRect, text: 'Insert your map image here' },
+        locationUrl,
       });
       if (mapImage && routeLabel) {
         await tpl.insertMapLabel(`ppt/slides/${slide5Base}.xml`, { ...fittedMapRect(mapImage, mapBoxRect), text: routeLabel });
