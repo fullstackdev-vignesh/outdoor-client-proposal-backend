@@ -14,8 +14,8 @@ router.use(protect);
 
 router.get('/', getBookings);
 router.get('/:id', getBooking);
-router.post('/', authorize('admin', 'tl'), createBooking);
-router.put('/:id', authorize('admin', 'tl'), updateBooking);
-router.patch('/:id/cancel', authorize('admin', 'tl'), cancelBooking);
+router.post('/', authorize('admin', 'tl', 'user', 'bd'), createBooking);
+router.put('/:id', authorize('admin', 'tl', 'user', 'bd'), updateBooking);
+router.patch('/:id/cancel', authorize('admin', 'tl', 'user', 'bd'), cancelBooking);
 
 module.exports = router;

@@ -51,8 +51,8 @@ const uploadFields = upload.fields([
 
 router.post('/', authorize('admin', 'tl', 'user', 'bd'), uploadFields, createSite);
 router.post('/upload-image', authorize('admin', 'tl', 'user', 'bd'), uploadFields, uploadImage);
-router.post('/bulk-import', authorize('admin', 'tl', 'user'), bulkImport);
-router.patch('/bulk-status', authorize('admin', 'tl', 'bd'), bulkChangeStatus);
+router.post('/bulk-import', authorize('admin', 'tl', 'user', 'bd'), bulkImport);
+router.patch('/bulk-status', authorize('admin', 'tl', 'user', 'bd'), bulkChangeStatus);
 router.put('/:id', authorize('admin', 'tl', 'user', 'bd'), uploadFields, updateSite);
 router.patch('/:id/status', authorize('admin', 'tl', 'user', 'bd'), changeStatus);
 router.patch('/:id/bookings/:bookingId/cancel', authorize('admin', 'tl', 'user', 'bd'), cancelBooking);

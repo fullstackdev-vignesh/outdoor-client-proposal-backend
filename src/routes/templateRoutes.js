@@ -14,10 +14,10 @@ function buildRouter(Model, options = {}) {
 
   router.get('/', ctrl.getAll);
   router.get('/:id', ctrl.getOne);
-  router.post('/', authorize('admin', 'tl'), upload.single('file'), ctrl.create);
-  router.put('/:id', authorize('admin', 'tl'), upload.single('file'), ctrl.update);
-  router.patch('/:id/status', authorize('admin', 'tl'), ctrl.setStatus);
-  router.delete('/:id', authorize('admin', 'tl'), ctrl.remove);
+  router.post('/', authorize('admin', 'tl', 'user', 'bd'), upload.single('file'), ctrl.create);
+  router.put('/:id', authorize('admin', 'tl', 'user', 'bd'), upload.single('file'), ctrl.update);
+  router.patch('/:id/status', authorize('admin', 'tl', 'user', 'bd'), ctrl.setStatus);
+  router.delete('/:id', authorize('admin', 'tl', 'user', 'bd'), ctrl.remove);
 
   return router;
 }
