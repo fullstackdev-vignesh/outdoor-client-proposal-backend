@@ -124,8 +124,13 @@ const createClient = asyncHandler(async (req, res) => {
     imageUrl = await uploadFile(file.buffer, file.originalname, file.mimetype, 'outdoor-proposal/clientLocationPinImage');
   }
 
+  const gstVal = req.body.gst !== undefined ? Number(req.body.gst) : 0;
+  const commVal = req.body.agencyComm !== undefined ? Number(req.body.agencyComm) : 0;
+
   const client = await Client.create({
     ...req.body,
+    gst: !isNaN(gstVal) && gstVal > 0 ? gstVal : null,
+    agencyComm: !isNaN(commVal) && commVal > 0 ? commVal : null,
     clientLocationPinImage: imageUrl || req.body.clientLocationPinImage || null,
     createdBy: req.user._id,
   });
@@ -161,6 +166,16 @@ const updateClient = asyncHandler(async (req, res) => {
   }
 
   const updateData = { ...req.body };
+
+  if (req.body.gst !== undefined) {
+    const gstVal = Number(req.body.gst);
+    updateData.gst = !isNaN(gstVal) && gstVal > 0 ? gstVal : null;
+  }
+
+  if (req.body.agencyComm !== undefined) {
+    const commVal = Number(req.body.agencyComm);
+    updateData.agencyComm = !isNaN(commVal) && commVal > 0 ? commVal : null;
+  }
 
   if (file) {
     const newUrl = await uploadFile(file.buffer, file.originalname, file.mimetype, 'outdoor-proposal/clientLocationPinImage');
