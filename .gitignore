@@ -33,7 +33,7 @@ yarn-error.log*
 .env
 .env*
 !.env.example
-.generated
+/uploads
 
 # typescript
 *.tsbuildinfo
