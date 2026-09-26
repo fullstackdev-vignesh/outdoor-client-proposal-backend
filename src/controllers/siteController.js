@@ -440,7 +440,10 @@ const createSite = asyncHandler(async (req, res) => {
     throw new Error(errors.join('; '));
   }
   await applyUploadedImage(payload, req);
+  const userName = req.user?.name || 'System';
   payload.createdBy = req.user._id;
+  payload.updatedBy = userName;
+  payload.inventoryUpdatedBy = userName;
   if (!payload.mediaStatus) payload.mediaStatus = 'available';
   if (!payload.illumination) payload.illumination = 'Front Lit';
 
@@ -517,6 +520,7 @@ const updateSite = asyncHandler(async (req, res) => {
 
   const { blockReason, blockNotes, bookingInfo, bookings: incomingBookings, ...siteFields } = payload;
   let unblockCancelled = [];
+  site.$locals.currentUserName = req.user?.name || 'System';
   Object.assign(site, siteFields);
   Site.applyComputedFields(site);
 
@@ -660,6 +664,7 @@ const changeStatus = asyncHandler(async (req, res) => {
   }
 
   await fillMissingCustomerNames(site);
+  site.$locals.currentUserName = req.user?.name || 'System';
   await site.save();
 
   const statusChanged = beforeStatus !== site.mediaStatus || beforeBookingId !== site.bookingInfo?.bookingId;
@@ -769,6 +774,7 @@ const bulkChangeStatus = asyncHandler(async (req, res) => {
     }
 
     await fillMissingCustomerNames(site);
+    site.$locals.currentUserName = req.user?.name || 'System';
     await site.save();
 
     const statusChanged = beforeStatus !== site.mediaStatus || beforeBookingId !== site.bookingInfo?.bookingId;
@@ -986,6 +992,8 @@ const bulkImport = asyncHandler(async (req, res) => {
       ...normalizeSiteBody(r),
       mediaStatus: r.mediaStatus || 'available',
       createdBy: req.user._id,
+      updatedBy: 'System',
+      inventoryUpdatedBy: 'System',
     };
     doc.latitude = optionalCoord(doc.latitude, 90);
     doc.longitude = optionalCoord(doc.longitude, 180);

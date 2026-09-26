@@ -102,6 +102,7 @@ const createProposal = asyncHandler(async (req, res) => {
     monthlyAmount,
     status: 'draft',
     createdBy: req.user._id,
+    updatedBy: req.user?.name || 'System',
   });
 
   res.status(201).json(proposal);
@@ -114,6 +115,7 @@ const updateProposal = asyncHandler(async (req, res) => {
     throw new Error('Proposal not found');
   }
   Object.assign(proposal, req.body);
+  proposal.$locals.currentUserName = req.user?.name || 'System';
   await proposal.save();
   res.json(proposal);
 });
@@ -147,6 +149,7 @@ const duplicateProposal = asyncHandler(async (req, res) => {
     generatedPptWithoutLocationUrl: undefined,
     generatedExcelUrl: undefined,
     createdBy: req.user._id,
+    updatedBy: req.user?.name || 'System',
   });
   res.status(201).json(copy);
 });
@@ -172,6 +175,7 @@ const generatePpt = asyncHandler(async (req, res) => {
       proposal.generatedPptWithLocationUrl = url;
     }
     proposal.status = proposal.generatedExcelUrl ? 'completed' : 'generated';
+    proposal.$locals.currentUserName = req.user?.name || 'System';
     await proposal.save();
     res.json(proposal);
   } catch (err) {
@@ -193,6 +197,7 @@ const generateExcel = asyncHandler(async (req, res) => {
   try {
     proposal.generatedExcelUrl = await generateProposalExcel(proposal);
     proposal.status = proposal.generatedPptUrl ? 'completed' : 'generated';
+    proposal.$locals.currentUserName = req.user?.name || 'System';
     await proposal.save();
     res.json(proposal);
   } catch (err) {

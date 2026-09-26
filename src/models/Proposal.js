@@ -28,6 +28,7 @@ const proposalSchema = new mongoose.Schema(
     generatedPptWithoutLocationUrl: String,
     generatedExcelUrl: String,
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    updatedBy: { type: String, default: 'System' },
     createdAt: { type: Date, default: nowIST },
     updatedAt: { type: Date, default: nowIST },
   },
@@ -38,6 +39,7 @@ proposalSchema.pre('save', function (next) {
   const now = nowIST();
   if (!this.createdAt) this.createdAt = now;
   this.updatedAt = now;
+  if (this.$locals.currentUserName) this.updatedBy = this.$locals.currentUserName;
   next();
 });
 

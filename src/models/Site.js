@@ -121,6 +121,8 @@ const siteSchema = new mongoose.Schema(
     blockInfo: blockInfoSchema,
     assignedTL: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    updatedBy: { type: String, default: 'System' },
+    inventoryUpdatedBy: { type: String, default: 'System' },
     createdAt: { type: Date, default: nowIST },
     updatedAt: { type: Date, default: nowIST },
     inventoryUpdatedAt: { type: Date, default: nowIST },
@@ -147,7 +149,7 @@ const MASTER_COMPARE_FIELDS = MASTER_FIELDS.filter((f) => !DERIVED_FIELDS.includ
 
 // Audit metadata that controllers rewrite on every save (e.g. every booking gets a fresh
 // updatedAt/updatedBy when the Edit Site form resubmits the bookings array) — not real data.
-const IGNORED_NESTED_KEYS = new Set(['createdAt', 'updatedAt', 'createdBy', 'updatedBy', 'bookedBy', 'blockedDate', 'blockedBy', '_id']);
+const IGNORED_NESTED_KEYS = new Set(['createdAt', 'updatedAt', 'inventoryUpdatedAt', 'createdBy', 'updatedBy', 'inventoryUpdatedBy', 'bookedBy', 'blockedDate', 'blockedBy', '_id']);
 
 // Order-independent, type-normalized serialization: Dates by time value, ObjectIds by hex,
 // and null/undefined/'' all treated as "empty".
@@ -198,8 +200,14 @@ siteSchema.pre('save', function (next) {
     snapshot(this, INVENTORY_FIELDS) !== inventorySnapshot ||
     this.$locals.forceInventoryTouch;
 
-  if (masterChanged) this.updatedAt = now;
-  if (inventoryChanged) this.inventoryUpdatedAt = now;
+  if (masterChanged) {
+    this.updatedAt = now;
+    if (this.$locals.currentUserName) this.updatedBy = this.$locals.currentUserName;
+  }
+  if (inventoryChanged) {
+    this.inventoryUpdatedAt = now;
+    if (this.$locals.currentUserName) this.inventoryUpdatedBy = this.$locals.currentUserName;
+  }
   next();
 });
 
