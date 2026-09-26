@@ -451,12 +451,12 @@ function applyFixedExtraColumns(sheetXml, stylesXml, cfg, firstDataRow, lastUsed
   // fully-bordered data area and Total row.
   const spacerRows = [];
   for (let i = 1; i <= (cfg.spacerRowsBeforeTotal || 0); i++) spacerRows.push(cfg.lastDataRow + i);
-  // ROTN also has a blank row BEFORE the first data row (its own SUM range starts at
-  // `sumRangeStartRow`, row2, one row above `firstDataRow`, row3) — same "genuine pre-existing
-  // bordered blank template row" situation as the after-data spacer, just on the other side.
-  if (cfg.sumRangeStartRow && cfg.sumRangeStartRow < firstDataRow) {
-    for (let r = cfg.sumRangeStartRow; r < firstDataRow; r++) spacerRows.push(r);
-  }
+  // ANY row between the header block and the first real data row is a genuine pre-existing
+  // template row (bordered blank cells for every ORIGINAL column) that isn't data — e.g. ROTN's
+  // own SUM range starting one row above firstDataRow, or Jagran's decorative row4
+  // spacer/border row between its row2:row3 header and row5 data. Whatever the reason, it needs
+  // the same matching cell as every other spacer, or it shows a gap in the border there.
+  for (let r = (blankHeaderRow || headerRow) + 1; r < firstDataRow; r++) spacerRows.push(r);
   for (const col of extraColumns) {
     const leftCol = numToCol(colToNum(col.before) - 1);
     const styleAttr = (row) => {
