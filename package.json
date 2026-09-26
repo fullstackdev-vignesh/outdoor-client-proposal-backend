@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
+    "build": "node -e \"require('fs').mkdirSync('build', {recursive: true})\"",
     "seed": "node src/seed.js",
     "seed:locations": "node src/scripts/seedLocations.js",
     "backfill:computed": "node src/scripts/backfillComputedFields.js",

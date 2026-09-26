@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: outdoor-client-proposal-backend
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: "5000"
+      - key: NODE_ENV
+        value: "production"
