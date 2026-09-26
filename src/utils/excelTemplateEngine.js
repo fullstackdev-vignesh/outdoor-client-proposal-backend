@@ -229,9 +229,30 @@ function insertCellInRow(sheetXml, rowNum, cellRef, cellXml) {
   return sheetXml.slice(0, m.index) + openTag + newInner + closeTag + sheetXml.slice(m.index + whole.length);
 }
 
-// Widens an existing <col> width entry for one column letter (or adds one if the sheet
-// never explicitly defined that column's width) — cosmetic only, doesn't move any cells.
-function setColumnWidth(sheetXml, colLetter, width) {
+// Finds whichever existing <col min,max> range covers `colNum` and returns its own column-level
+// `style="…"` (or undefined if that range has none). A column-level style applies to EVERY row
+// in that column, including ones with no cell entry at all — which is why every pre-existing
+// column in these templates still shows its default border/fill for blank rows far below the
+// generated table, while a brand-new column with no such style looks visibly different there.
+function getColStyle(sheetXml, colNum) {
+  for (const m of sheetXml.matchAll(/<col ([^>]*)\/>/g)) {
+    const minM = m[1].match(/min="(\d+)"/);
+    const maxM = m[1].match(/max="(\d+)"/);
+    if (!minM || !maxM) continue;
+    if (colNum < Number(minM[1]) || colNum > Number(maxM[1])) continue;
+    const styleM = m[1].match(/\bstyle="(\d+)"/);
+    return styleM ? styleM[1] : undefined;
+  }
+  return undefined;
+}
+
+// Widens an existing <col> width entry for one column letter (or adds one if the sheet never
+// explicitly defined that column's width) — cosmetic only, doesn't move any cells. `styleId`
+// (only meaningful on the "brand new column" path — an existing column keeps whatever
+// column-level style it already had) carries over a neighboring column's own style so blank
+// rows far below the generated table render identically instead of the new column looking
+// like a stray, unstyled gap.
+function setColumnWidth(sheetXml, colLetter, width, styleId) {
   const num = colToNum(colLetter);
   let found = false;
   sheetXml = sheetXml.replace(/<col ([^>]*)\/>/g, (whole, attrs) => {
@@ -252,9 +273,10 @@ function setColumnWidth(sheetXml, colLetter, width) {
     return `${whole}<col min="${num}" max="${num}" width="${width}" customWidth="1"/>`;
   });
   if (!found) {
+    const styleAttr = styleId ? ` style="${styleId}"` : '';
     sheetXml = sheetXml.includes('<cols>')
-      ? sheetXml.replace('</cols>', `<col min="${num}" max="${num}" width="${width}" customWidth="1"/></cols>`)
-      : sheetXml.replace(/(<sheetData)/, `<cols><col min="${num}" max="${num}" width="${width}" customWidth="1"/></cols>$1`);
+      ? sheetXml.replace('</cols>', `<col min="${num}" max="${num}" width="${width}" customWidth="1"${styleAttr}/></cols>`)
+      : sheetXml.replace(/(<sheetData)/, `<cols><col min="${num}" max="${num}" width="${width}" customWidth="1"${styleAttr}/></cols>$1`);
   }
   return sheetXml;
 }
@@ -299,12 +321,27 @@ function applyAdinnDynamicColumns(sheetXml, cfg, client, firstDataRow, lastUsedR
     totalCol = numToCol(colToNum(totalCol) + 1);
   }
 
-  // Header (row 1 label + merged row 2 blank cell) for each inserted fee column.
+  // Header label for each inserted fee column, on whichever row this format's OWN header text
+  // actually lives on (default row 1, matching Adinn's real row1:row2 merged header) — and its
+  // merged companion row IF this format actually merges one (Adinn does; ROTN's real header is
+  // row1 ALONE with no merge anywhere in the sheet, confirmed against the real file, so forcing
+  // a row-2 companion+merge there put a stray blue header-style fill one row above ROTN's real
+  // header, on top of what's otherwise a genuinely blank spacer row).
+  const headerRow = cfg.fixedExtraColumnHeaderRow || 1;
+  const blankHeaderRow = 'fixedExtraColumnBlankHeaderRow' in cfg ? cfg.fixedExtraColumnBlankHeaderRow : 2;
   for (const fee of inserted) {
     const headerText = `${fee.label} ${fee.percent}%`;
-    sheetXml = insertCellInRow(sheetXml, 1, `${fee.col}1`, `<c r="${fee.col}1" s="${styleIds.header}" t="inlineStr"><is><t>${xmlEscape(headerText)}</t></is></c>`);
-    sheetXml = insertCellInRow(sheetXml, 2, `${fee.col}2`, `<c r="${fee.col}2" s="${styleIds.header}"/>`);
-    sheetXml = addMergeCell(sheetXml, `${fee.col}1:${fee.col}2`);
+    sheetXml = insertCellInRow(
+      sheetXml,
+      headerRow,
+      `${fee.col}${headerRow}`,
+      `<c r="${fee.col}${headerRow}" s="${styleIds.header}" t="inlineStr"><is><t>${xmlEscape(headerText)}</t></is></c>`
+    );
+    if (blankHeaderRow) {
+      sheetXml = insertCellInRow(sheetXml, blankHeaderRow, `${fee.col}${blankHeaderRow}`, `<c r="${fee.col}${blankHeaderRow}" s="${styleIds.header}"/>`);
+      const [top, bottom] = [headerRow, blankHeaderRow].sort((a, b) => a - b);
+      sheetXml = addMergeCell(sheetXml, `${fee.col}${top}:${fee.col}${bottom}`);
+    }
   }
 
   // Each fee is a running percentage of the subtotal built up so far (the base cost columns,
@@ -333,7 +370,147 @@ function applyAdinnDynamicColumns(sheetXml, cfg, client, firstDataRow, lastUsedR
   }
   sheetXml = setCellFormula(sheetXml, `${totalCol}${totalRow}`, `SUM(${totalCol}${firstDataRow}:${totalCol}${lastUsedRow})`);
 
+  // Jagran/ROTN both have genuine pre-existing bordered-blank spacer row(s) around the data —
+  // one or more rows between the last data row and Total (`totalRow - lastUsedRow - 1` of
+  // them), and for ROTN also one row ABOVE firstDataRow (its own SUM range starts at
+  // cfg.sumRangeStartRow, one row earlier than the real data). Every other column already has
+  // a cell there; these fee columns didn't get one, leaving a gap in the border/fill exactly
+  // at that row — same class of bug already fixed for applyFixedExtraColumns's new columns.
+  const spacerRows = [];
+  for (let r = lastUsedRow + 1; r < totalRow; r++) spacerRows.push(r);
+  if (cfg.sumRangeStartRow && cfg.sumRangeStartRow < firstDataRow) spacerRows.push(cfg.sumRangeStartRow);
+  for (const fee of inserted) {
+    const leftCol = numToCol(colToNum(fee.col) - 1);
+    for (const r of spacerRows) {
+      // Row 2 sometimes already got a cell here (the header-merge companion row above always
+      // inserts one at row 2, which for ROTN happens to be the SAME row as its pre-data
+      // spacer) — skip rather than insert a second, invalid duplicate `<c>` for the same ref.
+      if (sheetXml.includes(`<c r="${fee.col}${r}"`)) continue;
+      const s = getCellStyle(sheetXml, `${leftCol}${r}`);
+      sheetXml = insertCellInRow(sheetXml, r, `${fee.col}${r}`, `<c r="${fee.col}${r}"${s ? ` s="${s}"` : ''}/>`);
+    }
+  }
+
   return sheetXml;
+}
+
+// Returns the `s="…"` style id of an existing cell (e.g. "B5"), or undefined if that exact
+// cell has no style attribute (or doesn't exist). Used so a brand-new inserted column's cells
+// can copy their immediate left neighbor's REAL style byte-for-byte instead of guessing a
+// plausible-looking existing style id — a guessed id can still differ in some way (border
+// weight, one missing side, font) that only shows up as a subtly "off" gridline once opened in
+// Excel, which is exactly what happened the first time around.
+function getCellStyle(sheetXml, cellRef) {
+  const m = sheetXml.match(new RegExp(`<c r="${cellRef}"([^>]*?)(?:/>|>)`));
+  if (!m) return undefined;
+  const styleMatch = m[1].match(/\bs="(\d+)"/);
+  return styleMatch ? styleMatch[1] : undefined;
+}
+
+// Brand-new columns that aren't part of the uploaded master file at all (e.g. Adinn's Media
+// Type/Latitude/Longitude, Jagran's Media Type/Latitude/Longitude) — unlike Agency Comm/GST
+// (conditional on the client, added by applyAdinnDynamicColumns/applyConditionalFeeColumns
+// further below), these are unconditional for every proposal in that format, so they're
+// inserted once, right up front, before any row gets its values filled in.
+//
+// Each entry's `before` letter is the column to open a gap at, evaluated against the sheet's
+// CURRENT state at the moment that entry runs — i.e. it already accounts for every earlier
+// entry in the list having shifted things first. `cfg.columns`/`totalColumns`/`removeColumns`/
+// `feeRangeStartCol`/`feeRangeBaseEndCol`/`feeColumnsBeforeAnchor`/`conditionalFee*` for this
+// format are written using the FINAL letters (after all of these insertions), since they
+// always happen.
+//
+// Different uploaded formats put their actual header TEXT on a different row — Adinn's row1 is
+// the real (merged row1:row2) header; Jagran's row1 is an entirely empty spacer row and row2
+// alone holds the header text for every existing column, with no merge at all. `cfg.fixedExtraColumnHeaderRow`
+// (default 1) / `cfg.fixedExtraColumnBlankHeaderRow` (default 2, or falsy to skip it and not
+// merge at all) let each format match its own real structure instead of assuming Adinn's.
+//
+// Every inserted cell's style is copied fresh from whichever real column ends up immediately
+// to its LEFT (per row) — never a fixed/guessed style id — so it's guaranteed to look exactly
+// like its neighbor no matter which format or which column this happens to land next to.
+//
+// `col.decimalValue: true` (Latitude/Longitude) additionally clones that copied DATA-row style
+// (once, not per-row — the same style id repeats for every data row already) down to a General
+// number format before reuse. Without this, a coordinate like 9.3147566 silently displays
+// rounded to "9" whenever its left neighbor happens to be a currency/whole-number column
+// (Total Cost, Total (Incl. All), etc.) — copying the neighbor's border/fill is exactly right,
+// but copying its number format along with it is not. The header/blank-header/total-row cells
+// never hold a decimal VALUE (text label or genuinely blank), so only the data-row style needs
+// this — cloning there alone is enough.
+function applyFixedExtraColumns(sheetXml, stylesXml, cfg, firstDataRow, lastUsedRow, totalRow) {
+  const extraColumns = cfg.fixedExtraColumns;
+  const headerRow = cfg.fixedExtraColumnHeaderRow || 1;
+  const blankHeaderRow = 'fixedExtraColumnBlankHeaderRow' in cfg ? cfg.fixedExtraColumnBlankHeaderRow : 2;
+  // Some formats (Jagran) have `spacerRowsBeforeTotal` blank row(s) between the last real data
+  // row and the Total row — a genuine pre-existing template row (bordered blank cells for
+  // every ORIGINAL column) sitting right at cfg.lastDataRow+1..+N in the template's own
+  // (still untrimmed) numbering, since this whole function runs before
+  // removeUnusedRowsAndShiftTail renumbers anything. Without a matching cell here too, these
+  // brand-new columns show a gap in the border exactly at that row, between an otherwise
+  // fully-bordered data area and Total row.
+  const spacerRows = [];
+  for (let i = 1; i <= (cfg.spacerRowsBeforeTotal || 0); i++) spacerRows.push(cfg.lastDataRow + i);
+  // ROTN also has a blank row BEFORE the first data row (its own SUM range starts at
+  // `sumRangeStartRow`, row2, one row above `firstDataRow`, row3) — same "genuine pre-existing
+  // bordered blank template row" situation as the after-data spacer, just on the other side.
+  if (cfg.sumRangeStartRow && cfg.sumRangeStartRow < firstDataRow) {
+    for (let r = cfg.sumRangeStartRow; r < firstDataRow; r++) spacerRows.push(r);
+  }
+  for (const col of extraColumns) {
+    const leftCol = numToCol(colToNum(col.before) - 1);
+    const styleAttr = (row) => {
+      const s = getCellStyle(sheetXml, `${leftCol}${row}`);
+      return s ? ` s="${s}"` : '';
+    };
+    const headerStyleAttr = styleAttr(headerRow);
+    const blankHeaderStyleAttr = blankHeaderRow ? styleAttr(blankHeaderRow) : '';
+    const totalStyleAttr = totalRow ? styleAttr(totalRow) : '';
+
+    sheetXml = insertColumnBefore(sheetXml, col.before);
+    sheetXml = insertCellInRow(
+      sheetXml,
+      headerRow,
+      `${col.before}${headerRow}`,
+      `<c r="${col.before}${headerRow}"${headerStyleAttr} t="inlineStr"><is><t>${xmlEscape(col.headerText)}</t></is></c>`
+    );
+    if (blankHeaderRow) {
+      sheetXml = insertCellInRow(sheetXml, blankHeaderRow, `${col.before}${blankHeaderRow}`, `<c r="${col.before}${blankHeaderRow}"${blankHeaderStyleAttr}/>`);
+      const [top, bottom] = [headerRow, blankHeaderRow].sort((a, b) => a - b);
+      sheetXml = addMergeCell(sheetXml, `${col.before}${top}:${col.before}${bottom}`);
+    }
+
+    // Bordered placeholder cell (previously had no `s=` at all, which rendered with no
+    // gridlines in this template's gridlines-off view) for every generated site row.
+    let dataStyleAttr = null; // resolved once per column, reused for every data row
+    for (let r = firstDataRow; r <= lastUsedRow; r++) {
+      if (dataStyleAttr === null) {
+        if (col.decimalValue && stylesXml) {
+          const neighborStyleId = getCellStyle(sheetXml, `${leftCol}${r}`);
+          if (neighborStyleId !== undefined) {
+            const cloned = cloneStyleWithNumFmt(stylesXml, Number(neighborStyleId), 0); // 0 = built-in General
+            stylesXml = cloned.stylesXml;
+            dataStyleAttr = ` s="${cloned.newIndex}"`;
+          } else {
+            dataStyleAttr = '';
+          }
+        } else {
+          dataStyleAttr = styleAttr(r);
+        }
+      }
+      sheetXml = insertCellInRow(sheetXml, r, `${col.before}${r}`, `<c r="${col.before}${r}"${dataStyleAttr}/>`);
+    }
+    // The Total row has no cell at all for these brand-new columns (they don't exist in the
+    // original template), which otherwise leaves that one row's worth of grey fill/border
+    // missing right under them — a plain styled blank (no value/formula needed here).
+    if (totalRow) {
+      sheetXml = insertCellInRow(sheetXml, totalRow, `${col.before}${totalRow}`, `<c r="${col.before}${totalRow}"${totalStyleAttr}/>`);
+    }
+    for (const r of spacerRows) {
+      sheetXml = insertCellInRow(sheetXml, r, `${col.before}${r}`, `<c r="${col.before}${r}"${styleAttr(r)}/>`);
+    }
+  }
+  return { sheetXml, stylesXml };
 }
 
 // Jagran-only: unlike Adinn/ROTN, the uploaded master file already has native Agency Comm/GST
@@ -575,10 +752,42 @@ async function generateExcelFromTemplate(rows, { buffer, config, client } = {}) 
   const zip = await JSZip.loadAsync(buf);
   const sheetPath = await resolveFirstSheetPath(zip);
   let sheetXml = await zip.file(sheetPath).async('string');
+  // Loaded up front (not only when cfg.indianCommaStyleIds is set) because
+  // applyFixedExtraColumns may also need to clone a style — e.g. Latitude/Longitude copy
+  // their left neighbor's border/fill exactly, but that neighbor is very often a currency
+  // column whose number format has 0 decimal places, which would otherwise silently round a
+  // coordinate like 9.3147566 down to 9.
+  const stylesPath = 'xl/styles.xml';
+  let stylesXml = zip.file(stylesPath) ? await zip.file(stylesPath).async('string') : null;
 
   const blockSize = cfg.mode === 'block-per-site' ? cfg.blockSize || 1 : 1;
   const maxSites = Math.floor((cfg.lastDataRow - cfg.firstDataRow + 1) / blockSize);
   const usable = rows.slice(0, maxSites);
+
+  if (cfg.fixedExtraColumns?.length && usable.length) {
+    // `blockSize` is 1 for row-per-site formats (Adinn/Jagran), so this is just
+    // firstDataRow + count - 1 there — but for block-per-site (ROTN, 2 rows per site), it must
+    // span every block's OWN 2 rows too (the 2nd/secondary row gets a placeholder cell here
+    // just like its real columns already do, even though collapseSecondaryRows deletes that
+    // row later — same as how secondaryRowColumns are already handled).
+    const lastRawRow = cfg.firstDataRow + usable.length * blockSize - 1;
+    const result = applyFixedExtraColumns(sheetXml, stylesXml, cfg, cfg.firstDataRow, lastRawRow, cfg.totalRow);
+    sheetXml = result.sheetXml;
+    stylesXml = result.stylesXml;
+  }
+
+  // insertColumnBefore only ever moves CELL ADDRESSES, never rewrites a formula's own text —
+  // fine for columns nothing references, but Adinn's Area column formula literally names the
+  // (now-shifted) Qty/Width/Height cells, so inserting Media Type ahead of them leaves it
+  // pointing at the wrong cells unless rewritten here (row-per-site only; ROTN's own block
+  // mode already rewrites its equivalent formulas inside collapseSecondaryRows).
+  if (cfg.mode !== 'block-per-site' && cfg.selfReferencingFormulas?.length && usable.length) {
+    for (let r = cfg.firstDataRow; r <= cfg.firstDataRow + usable.length - 1; r++) {
+      for (const { column, build } of cfg.selfReferencingFormulas) {
+        sheetXml = setCellFormula(sheetXml, `${column}${r}`, build(r, cfg.columns));
+      }
+    }
+  }
 
   sheetXml = cfg.mode === 'block-per-site' ? fillBlockPerSite(sheetXml, usable, cfg) : fillRowPerSite(sheetXml, usable, cfg);
 
@@ -602,9 +811,13 @@ async function generateExcelFromTemplate(rows, { buffer, config, client } = {}) 
     sheetXml = setCell(sheetXml, cell, text, { text: true });
   }
   // Widen columns whose auto-fit width is too narrow to show real values (e.g. Area shows
-  // "#####" once real numbers replace the blank template cells).
+  // "#####" once real numbers replace the blank template cells). For a brand-new column (no
+  // existing <col> entry of its own — e.g. Media Type/Latitude/Longitude) this also carries
+  // over its left neighbor's own column-level style, so it looks consistent below the table
+  // instead of being the one column with no style rendering blank rows differently.
   for (const { col, width } of cfg.columnWidths || []) {
-    sheetXml = setColumnWidth(sheetXml, col, width);
+    const neighborColStyle = getColStyle(sheetXml, colToNum(col) - 1);
+    sheetXml = setColumnWidth(sheetXml, col, width, neighborColStyle);
   }
 
   // Collapsing turns each used site's 2-row block into a single visible row (deleting the
@@ -656,15 +869,12 @@ async function generateExcelFromTemplate(rows, { buffer, config, client } = {}) 
   // finds the right cells even after removeColumns/insertColumnBefore shifted them, and
   // automatically covers the dynamically-inserted Agency Comm/GST cells too since those reuse
   // Total Cost's own style ids.
-  if (cfg.indianCommaStyleIds?.length) {
-    const stylesPath = 'xl/styles.xml';
-    if (zip.file(stylesPath)) {
-      let stylesXml = await zip.file(stylesPath).async('string');
-      const result = applyIndianNumberFormat(sheetXml, stylesXml, cfg.indianCommaStyleIds);
-      sheetXml = result.sheetXml;
-      zip.file(stylesPath, result.stylesXml);
-    }
+  if (cfg.indianCommaStyleIds?.length && stylesXml) {
+    const result = applyIndianNumberFormat(sheetXml, stylesXml, cfg.indianCommaStyleIds);
+    sheetXml = result.sheetXml;
+    stylesXml = result.stylesXml;
   }
+  if (stylesXml) zip.file(stylesPath, stylesXml);
 
   if (zip.file('xl/workbook.xml')) {
     let workbookXml = await zip.file('xl/workbook.xml').async('string');

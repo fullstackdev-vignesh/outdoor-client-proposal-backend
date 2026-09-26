@@ -1207,6 +1207,7 @@ function buildExcelRow(site, index) {
     state: site.state || '',
     city: site.city || '',
     media: site.mediaId || '',
+    mediaType: site.mediaType || '',
     location: site.location || site.areaName || '',
     qty: site.quantity || 1,
     width: site.width || 0,
@@ -1217,6 +1218,10 @@ function buildExcelRow(site, index) {
     printingCost: site.printingCost || 0,
     mountingCost: site.mountingCost || 0,
     siteStatus: site.mediaStatus ? site.mediaStatus.charAt(0).toUpperCase() + site.mediaStatus.slice(1) : '',
+    // Blank (never 0) when a site has no coordinates set, so fillRowPerSite's skip-if-empty
+    // rule leaves the cell's placeholder blank instead of writing a misleading "0".
+    latitude: site.latitude != null ? site.latitude : '',
+    longitude: site.longitude != null ? site.longitude : '',
     // Site Information master data's description (jagran-excel-2's "Rationale" column) — blank
     // when the site has no siteInfoId linked, rather than showing a template's own leftover text.
     rationale: (site.siteInfoId && typeof site.siteInfoId === 'object' && site.siteInfoId.description) || '',
