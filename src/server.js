@@ -60,7 +60,9 @@ const RECONCILE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const allowedOrigins = [
   "https://adinn-space.sgp1.cdn.digitaloceanspaces.com",
   "https://outdoor-client-proposal-backend.onrender.com",
+  "https://outdoor-client-proposal-backend.onrender.com",
   "https://outdoor-client-proposal-frontend-m3.vercel.app",
+  "https://outdoor-client-proposal-frontend-m3.vercel.app/",
   "https://adinntech.in",
   "https://www.adinntech.in",
   "http://localhost:3000",
