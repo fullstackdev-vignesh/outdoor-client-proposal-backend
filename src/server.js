@@ -29,6 +29,7 @@ app.use(cors({
   origin: [
     "https://adinn-space.sgp1.cdn.digitaloceanspaces.com/outdoor-proposal",
     "https://adinn-space.sgp1.cdn.digitaloceanspaces.com/outdoor-proposal/",
+    "https://outdoor-client-proposal-backend.onrender.com",
     "https://outdoor-client-proposal-backend.onrender.com/api",
     "https://outdoor-client-proposal-frontend-m3.vercel.app",
     "https://adinn-space.sgp1.cdn.digitaloceanspaces.com",
