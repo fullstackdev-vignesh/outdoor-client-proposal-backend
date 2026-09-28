@@ -1,11 +1,14 @@
+const dns = require("dns");
+dns.setServers(["8.8.8.8", "1.1.1.1"]);
 require('dotenv').config();
 const app = require('./app');
 const connectDB = require('./config/db');
 const { reconcileAllSites } = require('./services/bookingScheduler');
-
+const cors = require("cors");
 const PORT = process.env.PORT || 5000;
 const RECONCILE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
+app.use(cors());
 connectDB()
   .then(() => {
     app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
@@ -22,6 +25,15 @@ connectDB()
     console.error('Failed to connect to MongoDB', err);
     process.exit(1);
   });
-
+app.use(cors({
+  origin: [
+    "https://adinn-space.sgp1.cdn.digitaloceanspaces.com/Rental-OOH",
+    "https://adinn-space.sgp1.cdn.digitaloceanspaces.com/Rental-OOH/",
+    "https://adinntech.in/",
+    "https://adinntech.in"
+  ],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
 
   
