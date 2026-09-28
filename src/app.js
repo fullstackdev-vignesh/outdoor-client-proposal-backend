@@ -46,6 +46,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+app.use('/api/image-proxy', require('./routes/imageProxyRoutes'));
 
 app.use('/generated', express.static(path.join(__dirname, '..', 'generated')));
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
