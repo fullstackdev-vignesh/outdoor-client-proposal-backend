@@ -1,13 +1,13 @@
 const dns = require("dns");
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
 require('dotenv').config();
-const app = require('./app');
+const express = require("express");
 const connectDB = require('./config/db');
 const { reconcileAllSites } = require('./services/bookingScheduler');
 const cors = require("cors");
 const PORT = process.env.PORT || 5001;
 const RECONCILE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-
+const app = express();
 app.use(cors());
 connectDB()
   .then(() => {
