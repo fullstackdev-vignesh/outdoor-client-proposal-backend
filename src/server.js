@@ -5,7 +5,7 @@ const app = require('./app');
 const connectDB = require('./config/db');
 const { reconcileAllSites } = require('./services/bookingScheduler');
 const cors = require("cors");
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 const RECONCILE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 app.use(cors());
@@ -27,8 +27,11 @@ connectDB()
   });
 app.use(cors({
   origin: [
-    "https://adinn-space.sgp1.cdn.digitaloceanspaces.com/Rental-OOH",
-    "https://adinn-space.sgp1.cdn.digitaloceanspaces.com/Rental-OOH/",
+    "https://adinn-space.sgp1.cdn.digitaloceanspaces.com/outdoor-proposal",
+    "https://adinn-space.sgp1.cdn.digitaloceanspaces.com/outdoor-proposal/",
+    "https://outdoor-client-proposal-backend.onrender.com/api",
+    "https://outdoor-client-proposal-frontend-m3.vercel.app",
+    "https://adinn-space.sgp1.cdn.digitaloceanspaces.com",
     "https://adinntech.in/",
     "https://adinntech.in"
   ],
