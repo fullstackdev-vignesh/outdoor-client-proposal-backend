@@ -411,6 +411,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
           : [],
         boxWidths: withLocation ? [] : DIRECT_CLIENT_BOX_WIDTHS,
         locationUrl,
+        locationLinkText: true,
         // "With Location" removes the Site Info card outright (not just when the site has none),
         // since the whole Media Specifications side of the slide is hidden in that mode.
         removeGroupNames: withLocation || !siteInfo?.description ? ['Group 29'] : [],
@@ -526,6 +527,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
           images: siteImage ? [{ relId: 'rId6', ...siteImage, boxWidthEMU: 11366193, boxHeightEMU: 7736815 }] : [],
           boxWidths: ADINN_MEDIA_SPEC_BOX_WIDTHS,
           locationUrl,
+          locationLinkText: true,
         });
         siteSlideBaseNames.push(slide4Base);
         continue;

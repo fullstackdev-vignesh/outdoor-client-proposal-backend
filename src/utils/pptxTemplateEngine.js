@@ -193,6 +193,29 @@ function removeRedHighlightShapes(slideXml) {
   });
 }
 
+// Red "Click to View Site Location" textbox right of the location pin (position/style copied from
+// adinn-new-template slide4's own "TextBox 40"; Adinn-Direct-Client-format's pin sits at the same
+// spot). The link sits on the shape, not the text run, so the text keeps its red colour instead of
+// PowerPoint's blue hyperlink style. Reuses the slide's existing hyperlink relationship (the one
+// updateLocationHyperlink points at the site's coordinates); without one, nothing is added.
+function insertLocationLinkText(slideXml, relsXml, locationUrl, shapeId) {
+  const hlinkRel = (relsXml.match(/<Relationship\b[^>]*relationships\/hyperlink"[^>]*\/>/) || [])[0];
+  const relId = hlinkRel && (hlinkRel.match(/\bId="([^"]*)"/) || [])[1];
+  if (!relId) return slideXml;
+  const url = xmlEscape(locationUrl);
+  const font = '<a:latin typeface="Times New Roman" panose="02020603050405020304" pitchFamily="18" charset="0"/>' +
+    '<a:cs typeface="Times New Roman" panose="02020603050405020304" pitchFamily="18" charset="0"/>';
+  const textBox =
+    `<p:sp><p:nvSpPr><p:cNvPr id="${shapeId}" name="Site Location Link"><a:hlinkClick r:id="${relId}" tooltip="${url}"/></p:cNvPr>` +
+    `<p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>` +
+    `<p:spPr><a:xfrm><a:off x="1001829" y="9510236"/><a:ext cx="3874971" cy="738664"/></a:xfrm>` +
+    `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>` +
+    `<p:txBody><a:bodyPr wrap="square" rtlCol="0"><a:spAutoFit/></a:bodyPr><a:lstStyle/>` +
+    `<a:p><a:r><a:rPr lang="en-IN" sz="2400" kern="1200" dirty="0"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>${font}</a:rPr>` +
+    `<a:t>Click to View Site Location</a:t></a:r></a:p></p:txBody></p:sp>`;
+  return slideXml.replace('</p:spTree>', `${textBox}</p:spTree>`);
+}
+
 class PptxTemplate {
   constructor(zip) {
     this.zip = zip;
@@ -426,6 +449,7 @@ class PptxTemplate {
       removeGroupNames = [],
       removeShapesAtOffset = [],
       locationUrl,
+      locationLinkText = false,
     } = {}
   ) {
     const slidePath = `ppt/slides/${templateBaseName}.xml`;
@@ -441,6 +465,12 @@ class PptxTemplate {
     }
 
     slideXml = removeRedHighlightShapes(slideXml);
+
+    // "Click to View Site Location" beside the bottom-left location pin — added after the red-shape
+    // cleanup above (which would otherwise drop this red text), linked to the same Google Maps URL.
+    if (locationUrl && locationLinkText) {
+      slideXml = insertLocationLinkText(slideXml, relsXml, locationUrl, 9700 + this._nextSlideIndex);
+    }
 
     for (const groupName of removeGroupNames) {
       const groupRe = /<p:grpSp>(?:(?!<\/p:grpSp>)[\s\S])*?<\/p:grpSp>/g;
@@ -747,11 +777,13 @@ class PptxTemplate {
     this.writeText('ppt/slides/slide1.xml', slideXml);
   }
 
-  // adinn-new-template's slide1 splits "Date: Aug 10, 2026" across two runs ("D" + "ate: Aug 10, 2026").
-  // Only the "ate: ..." run is touched so the "D" run/formatting is left completely intact.
+  // Sets the cover's "Date: ..." text to the generation date. Templates store it two ways:
+  // split across two runs ("D" + "ate: SEP 08, 2026" — Adinn-Direct-Client-format) or as one
+  // run ("Date: Aug 10, 2026" — adinn-new-template). Only the run holding "ate:" is rewritten,
+  // keeping its own "D" prefix when it has one, so the split "D" run/formatting stays intact.
   async setCoverDateLabel(dateLabel) {
     let slideXml = await this.readText('ppt/slides/slide1.xml');
-    slideXml = slideXml.replace(/<a:t>ate:\s*[^<]*<\/a:t>/, `<a:t>ate: ${xmlEscape(dateLabel)}</a:t>`);
+    slideXml = slideXml.replace(/<a:t>(D?)ate:\s*[^<]*<\/a:t>/, (_, d) => `<a:t>${d}ate: ${xmlEscape(dateLabel)}</a:t>`);
     this.writeText('ppt/slides/slide1.xml', slideXml);
   }
 
