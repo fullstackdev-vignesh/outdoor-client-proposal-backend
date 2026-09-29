@@ -240,6 +240,26 @@ function insertLocationLinkText(slideXml, relsXml, locationUrl, shapeId) {
   return slideXml.replace('</p:spTree>', `${textBox}</p:spTree>`);
 }
 
+// Location pin for a slide that doesn't have one of its own (adinn-new-template slide5, used for
+// "with location"): the same picture-filled shape as slide4's "Freeform 28" — same size and
+// bottom-left spot, filled with that template's existing pin image (`imageTarget`, e.g.
+// "../media/image31.png") — linked to the slide's hyperlink relationship like the text beside it.
+function insertLocationPin(slideXml, relsXml, locationUrl, shapeId, imageTarget) {
+  const hlinkRel = (relsXml.match(/<Relationship\b[^>]*relationships\/hyperlink"[^>]*\/>/) || [])[0];
+  const hlinkId = hlinkRel && (hlinkRel.match(/\bId="([^"]*)"/) || [])[1];
+  if (!hlinkId || !imageTarget) return { slideXml, relsXml };
+  const imageRelId = `rIdLocPin${shapeId}`;
+  relsXml = relsXml.replace(
+    '</Relationships>',
+    `<Relationship Id="${imageRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="${imageTarget}"/></Relationships>`
+  );
+  const pin =
+    `<p:sp><p:nvSpPr><p:cNvPr id="${shapeId}" name="Site Location Pin"><a:hlinkClick r:id="${hlinkId}" tooltip="${xmlEscape(locationUrl)}"/></p:cNvPr>` +
+    `<p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="412769" y="9334500"/><a:ext cx="534229" cy="868665"/></a:xfrm>` +
+    `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:blipFill><a:blip r:embed="${imageRelId}"/><a:stretch><a:fillRect/></a:stretch></a:blipFill></p:spPr></p:sp>`;
+  return { slideXml: slideXml.replace('</p:spTree>', `${pin}</p:spTree>`), relsXml };
+}
+
 class PptxTemplate {
   constructor(zip) {
     this.zip = zip;
@@ -474,6 +494,7 @@ class PptxTemplate {
       removeShapesAtOffset = [],
       locationUrl,
       locationLinkText = false,
+      locationPinImage,
     } = {}
   ) {
     const slidePath = `ppt/slides/${templateBaseName}.xml`;
@@ -492,6 +513,9 @@ class PptxTemplate {
 
     // "Click to View Site Location" beside the bottom-left location pin — added after the red-shape
     // cleanup above (which would otherwise drop this red text), linked to the same Google Maps URL.
+    if (locationUrl && locationPinImage) {
+      ({ slideXml, relsXml } = insertLocationPin(slideXml, relsXml, locationUrl, 9800 + this._nextSlideIndex, locationPinImage));
+    }
     if (locationUrl && locationLinkText) {
       slideXml = insertLocationLinkText(slideXml, relsXml, locationUrl, 9700 + this._nextSlideIndex);
     }

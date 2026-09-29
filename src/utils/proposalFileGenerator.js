@@ -557,6 +557,9 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
         clearImageRelId: mapImage ? undefined : 'rId5',
         placeholderText: mapImage ? undefined : { ...mapBoxRect, text: 'Insert your map image here' },
         locationUrl,
+        // slide5 has no pin of its own — add slide4's pin image + "Click to View Site Location" at the same spot.
+        locationPinImage: '../media/image31.png',
+        locationLinkText: true,
       });
       if (mapImage && routeLabel) {
         await tpl.insertMapLabel(`ppt/slides/${slide5Base}.xml`, { ...fittedMapRect(mapImage, mapBoxRect), text: routeLabel });
