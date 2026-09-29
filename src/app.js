@@ -21,6 +21,7 @@ const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:5000',
   'http://localhost:8080',
+  'https://outdoor-client-proposal-frontend.vercel.app',
   'https://outdoor-client-proposal-frontend-m3.vercel.app',
   'https://adinn-space.sgp1.cdn.digitaloceanspaces.com',
   'https://adinntech.in',
