@@ -193,6 +193,30 @@ function removeRedHighlightShapes(slideXml) {
   });
 }
 
+// Same exact-text swap as a single "<a:t>old</a:t>" match, for when PowerPoint has split that text
+// across several runs of one paragraph (e.g. adinn-new-template slide4's title, broken into
+// "Periyanayakanpalayam" / " bridge towards " / "Mettupalayam" / " 40x30" by spell-check marks).
+// The paragraph's runs are collapsed into its first run (keeping that run's formatting, minus the
+// spell-check error flag) holding the new text. Only a paragraph whose runs join to exactly
+// `oldText` is touched, and only the first such paragraph (matching the single-match swap).
+function replaceSplitParagraphText(slideXml, oldText, newText) {
+  const paraRe = /<a:p>(?:(?!<\/a:p>)[\s\S])*?<\/a:p>/g;
+  let done = false;
+  return slideXml.replace(paraRe, (para) => {
+    if (done) return para;
+    const runs = para.match(/<a:r>(?:(?!<\/a:r>)[\s\S])*?<\/a:r>/g);
+    if (!runs || runs.length < 2) return para;
+    const joined = runs.map((r) => (r.match(/<a:t>([^<]*)<\/a:t>/) || [])[1] || '').join('');
+    if (joined !== oldText) return para;
+    done = true;
+    const firstRun = runs[0].replace(/ err="1"/, '').replace(/<a:t>[^<]*<\/a:t>/, `<a:t>${xmlEscape(newText)}</a:t>`);
+    const start = para.indexOf(runs[0]);
+    const lastRun = runs[runs.length - 1];
+    const end = para.lastIndexOf(lastRun) + lastRun.length;
+    return para.slice(0, start) + firstRun + para.slice(end);
+  });
+}
+
 // Red "Click to View Site Location" textbox right of the location pin (position/style copied from
 // adinn-new-template slide4's own "TextBox 40"; Adinn-Direct-Client-format's pin sits at the same
 // spot). The link sits on the shape, not the text run, so the text keeps its red colour instead of
@@ -489,6 +513,8 @@ class PptxTemplate {
       const target = `<a:t>${oldText}</a:t>`;
       if (slideXml.includes(target)) {
         slideXml = slideXml.replace(target, `<a:t>${xmlEscape(newText)}</a:t>`);
+      } else {
+        slideXml = replaceSplitParagraphText(slideXml, oldText, newText);
       }
     }
 
