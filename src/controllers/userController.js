@@ -11,15 +11,27 @@ const mapRoleToUserType = (r) => {
 const getUsers = asyncHandler(async (req, res) => {
   const filter = {};
   if (req.query.role) filter.role = req.query.role;
-  if (req.query.search) filter.name = new RegExp(req.query.search, 'i');
+  if (req.query.search) filter.name = new RegExp(String(req.query.search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
 
   if (req.user.role === 'tl') {
     filter.role = 'user';
     filter.assignedTL = req.user._id;
   }
 
-  const users = await User.find(filter).sort({ updatedAt: -1, _id: -1 });
-  res.json(users);
+  const sort = { updatedAt: -1, _id: -1 };
+  // Without ?page the full array is returned (existing callers); with ?page (and optional
+  // ?limit, default 20, max 100) one page as { items, total, page, pages }, like /clients.
+  if (req.query.page === undefined) {
+    const users = await User.find(filter).sort(sort);
+    return res.json(users);
+  }
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(100, Number(req.query.limit) || 20);
+  const [items, total] = await Promise.all([
+    User.find(filter).sort(sort).skip((page - 1) * limit).limit(limit),
+    User.countDocuments(filter),
+  ]);
+  res.json({ items, total, page, pages: Math.ceil(total / limit) });
 });
 
 const getUser = asyncHandler(async (req, res) => {
