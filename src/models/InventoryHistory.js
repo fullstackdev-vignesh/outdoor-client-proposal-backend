@@ -3,6 +3,16 @@ const mongoose = require('mongoose');
 const IST_OFFSET_MS = 330 * 60000;
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 
+const bookingEditSnapshot = () => ({
+  customerType: String,
+  client: { type: mongoose.Schema.Types.ObjectId, ref: 'Client' },
+  customerName: String,
+  startDate: Date,
+  endDate: Date,
+  durationDays: Number,
+  amount: Number,
+});
+
 const inventoryHistorySchema = new mongoose.Schema({
   site: { type: mongoose.Schema.Types.ObjectId, ref: 'Site', required: true, index: true },
   mediaId: { type: String, required: true },
@@ -61,6 +71,19 @@ const inventoryHistorySchema = new mongoose.Schema({
     cancelledByRole: String,
     cancellationType: { type: String, enum: ['manual', 'blocked'] },
   },
+  // Booking rows only: every edit to the booking's client/dates/amount, oldest first. The row
+  // itself (bookingSnapshot) always holds the latest values, so without this the Timeline could
+  // never show what the booking was before it was changed.
+  edits: [
+    {
+      _id: false,
+      editedAt: Date,
+      editedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      source: { type: String, enum: ['sites', 'inventory'] },
+      previous: bookingEditSnapshot(),
+      next: bookingEditSnapshot(),
+    },
+  ],
 });
 
 inventoryHistorySchema.index({ site: 1, effectiveTo: 1 });

@@ -808,10 +808,12 @@ const AUTO_BLOCK_END_REASON = 'Booking ended — site was blocked';
 //   • "Booked" at the time the booking was made — always shown, even if it was later cancelled;
 //   • "Booking Cancelled" at the cancel time — only for a real (manual) cancellation. A booking
 //     that ended automatically because the site was blocked is NOT a separate step; the Booked
-//     event just carries `endedEarlyAt` ("Ended early — site was blocked").
+//     event just carries `endedEarlyAt` ("Ended early — site was blocked");
+//   • "Booking Updated" (eventType 'edited') for each change to the booking's client/dates,
+//     carrying `previousBooking` (before) and `bookingSnapshot` (after).
 const getSiteTimeline = asyncHandler(async (req, res) => {
   const [rows, site] = await Promise.all([
-    InventoryHistory.find({ site: req.params.id }).populate('changedBy', 'name').lean(),
+    InventoryHistory.find({ site: req.params.id }).populate('changedBy', 'name').populate('edits.editedBy', 'name').lean(),
     Site.findById(req.params.id).select('bookings.bookingId bookings.createdAt').lean(),
   ]);
   const bookingCreatedAt = new Map((site?.bookings || []).map((b) => [b.bookingId, b.createdAt]));
@@ -829,15 +831,39 @@ const getSiteTimeline = asyncHandler(async (req, res) => {
     const endedByBlock =
       row.status === 'cancelled' && (cancel.cancellationType === 'blocked' || cancel.reason === AUTO_BLOCK_END_REASON);
     const bookedAt = row.bookedAt || bookingCreatedAt.get(row.bookingId) || insertedAt(row);
+    const edits = row.edits || [];
+    // The row holds the booking's LATEST values; if it was edited, the "Booked" step shows what
+    // it was originally booked as, and each edit becomes its own "Booking Updated" step.
+    const original = edits[0]?.previous;
 
     events.push({
       ...row,
+      ...(original && {
+        bookingSnapshot: { ...row.bookingSnapshot, ...original },
+        effectiveFrom: original.startDate,
+        effectiveTo: original.endDate,
+      }),
       status: 'booked',
       eventKey: `${row._id}-booked`,
       eventAt: bookedAt,
       bookingLifecycle: row.status === 'cancelled' ? null : computeBookingLifecycle(row),
       endedEarlyAt: endedByBlock ? cancel.cancelledAt : undefined,
       cancelled: row.status === 'cancelled' && !endedByBlock,
+    });
+    edits.forEach((edit, i) => {
+      events.push({
+        ...row,
+        status: 'booked',
+        eventType: 'edited',
+        eventKey: `${row._id}-edit-${i}`,
+        eventAt: edit.editedAt,
+        changedBy: edit.editedBy,
+        source: edit.source || row.source,
+        bookingSnapshot: { ...row.bookingSnapshot, ...edit.next },
+        previousBooking: edit.previous,
+        effectiveFrom: edit.next?.startDate,
+        effectiveTo: edit.next?.endDate,
+      });
     });
     if (row.status === 'cancelled' && !endedByBlock) {
       events.push({ ...row, eventKey: `${row._id}-cancelled`, eventAt: cancel.cancelledAt || row.changedAt });

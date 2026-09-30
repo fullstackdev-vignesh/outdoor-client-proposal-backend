@@ -113,11 +113,21 @@ async function syncBookingTimelineRecords(site, userId, source) {
     const existing = await InventoryHistory.findOne({ site: site._id, bookingId: b.bookingId }).lean();
     if (existing && !bookingRowChanged(existing, update)) continue;
     update.updatedAt = now;
-    await InventoryHistory.findOneAndUpdate(
-      { site: site._id, bookingId: b.bookingId },
-      { $set: update, $setOnInsert: { bookedAt: b.createdAt || now } },
-      { upsert: true }
-    );
+    const ops = { $set: update, $setOnInsert: { bookedAt: b.createdAt || now } };
+    // The row is overwritten with the latest booking values, so keep what it was before —
+    // lets the Timeline show "Booking Updated: old dates → new dates" as its own step.
+    if (existing && existing.status !== 'cancelled' && !isCancelled && fieldsDiffer(existing.bookingSnapshot, update.bookingSnapshot, BOOKING_EDIT_FIELDS)) {
+      ops.$push = {
+        edits: {
+          editedAt: now,
+          editedBy: userId,
+          source,
+          previous: pickEditFields(existing.bookingSnapshot),
+          next: pickEditFields(update.bookingSnapshot),
+        },
+      };
+    }
+    await InventoryHistory.findOneAndUpdate({ site: site._id, bookingId: b.bookingId }, ops, { upsert: true });
   }
 }
 
@@ -125,6 +135,14 @@ async function syncBookingTimelineRecords(site, userId, source) {
 const BOOKING_ROW_FIELDS = ['mediaId', 'mediaType', 'state', 'city', 'mediaImage', 'siteOwner', 'status', 'isActive', 'effectiveFrom', 'effectiveTo'];
 const BOOKING_SNAPSHOT_FIELDS = ['customerType', 'client', 'customerName', 'startDate', 'endDate', 'durationDays', 'monthlyTotalCost', 'amount'];
 const CANCELLATION_SNAPSHOT_FIELDS = ['reason', 'cancelledAt', 'cancelledByName', 'cancelledByRole', 'cancellationType'];
+// Changes that count as the user editing the booking (customerName is left out — older rows may
+// only now be getting it filled in from the client, which isn't an edit).
+const BOOKING_EDIT_FIELDS = ['customerType', 'client', 'startDate', 'endDate', 'amount'];
+const EDIT_SNAPSHOT_FIELDS = ['customerType', 'client', 'customerName', 'startDate', 'endDate', 'durationDays', 'amount'];
+
+function pickEditFields(snapshot) {
+  return Object.fromEntries(EDIT_SNAPSHOT_FIELDS.map((f) => [f, snapshot?.[f]]));
+}
 
 // Dates compare by time value, ObjectIds by hex string, and empty values as equal.
 function normalizeValue(v) {
