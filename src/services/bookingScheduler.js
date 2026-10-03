@@ -11,6 +11,19 @@ function toUtcMidnight(value) {
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
 }
 
+const IST_OFFSET_MS = 330 * 60000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+// IST wall-clock stored as UTC (same convention as every model's nowIST), so its UTC date is the IST date —
+// booking days therefore roll over at IST midnight, not at 05:30 IST (UTC midnight).
+const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
+
+// The moment a booking stops being live: 12:01 AM IST on the day after its end date. Used to stamp
+// the Booked -> Available change at the real transition time, even when the server was down then and
+// the reconcile only ran later (e.g. on startup).
+function bookingEndTransitionAt(endDate) {
+  return new Date(toUtcMidnight(endDate) + DAY_MS + 60 * 1000);
+}
+
 /**
  * Recomputes a site's live mediaStatus/bookingInfo/isActive from its `bookings` array as of
  * `asOf` (defaults to now) and mutates the site in place. This is the single source of truth
@@ -25,7 +38,7 @@ function toUtcMidnight(value) {
  * Does NOT decide whether anything "changed" — callers compare their own before/after
  * snapshot (mediaStatus + bookingInfo.bookingId) since they already hold both.
  */
-function resolveSiteStatus(site, asOf = new Date()) {
+function resolveSiteStatus(site, asOf = nowIST()) {
   if (site.mediaStatus === 'blocked') return { activeBooking: null };
 
   const today = toUtcMidnight(asOf);
@@ -91,12 +104,18 @@ async function reconcileAllSites() {
   for (const site of candidates) {
     const previousStatus = site.mediaStatus;
     const previousBookingId = site.bookingInfo?.bookingId;
+    const previousEndDate = site.bookingInfo?.endDate;
     resolveSiteStatus(site);
     const changed = previousStatus !== site.mediaStatus || previousBookingId !== site.bookingInfo?.bookingId;
     if (!changed) continue;
+    // A booking that ran out became Available at 12:01 AM the day after it ended — not whenever this ran.
+    const effectiveAt =
+      previousStatus === 'booked' && site.mediaStatus === 'available' && previousEndDate
+        ? new Date(Math.min(bookingEndTransitionAt(previousEndDate).getTime(), nowIST().getTime()))
+        : undefined;
     try {
       await site.save();
-      await recordStatusPeriod({ site, previousStatus, source: 'inventory', userId: null });
+      await recordStatusPeriod({ site, previousStatus, source: 'inventory', userId: null, effectiveAt });
       updated += 1;
     } catch (err) {
       // Don't let one bad site abort reconciliation for the rest.

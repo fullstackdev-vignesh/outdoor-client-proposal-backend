@@ -184,11 +184,14 @@ const buildFilter = (query) => {
       { areaName: new RegExp(query.search, 'i') },
     ];
   }
-  if (query.mediaType) filter.mediaType = query.mediaType;
+  // Case-insensitive exact match, so "Unipole" also finds sites saved as "unipole".
+  if (query.mediaType) filter.mediaType = new RegExp(`^${escapeRegex(String(query.mediaType).trim())}$`, 'i');
   if (query.state) filter.state = new RegExp(`^${escapeRegex(query.state.trim())}$`, 'i');
   if (query.city) filter.city = new RegExp(escapeRegex(query.city.trim()), 'i');
   if (query.mediaStatus) filter.mediaStatus = query.mediaStatus;
-  if (query.siteOwner) filter.siteOwner = query.siteOwner;
+  // One owner (?siteOwner=A) or several (?siteOwner[]=A&siteOwner[]=B) — a site matches any of them.
+  const owners = [].concat(query.siteOwner || []).filter(Boolean);
+  if (owners.length) filter.siteOwner = owners.length === 1 ? owners[0] : { $in: owners };
   if (query.isActive !== undefined && query.isActive !== '') filter.isActive = query.isActive === 'true';
   if (query.minPrice || query.maxPrice) {
     filter.monthlyAmount = {};
@@ -365,14 +368,21 @@ function buildBookingRecord(site, input, userId, existingBooking) {
 // today's campaign doesn't create a duplicate row); otherwise appends a new booking.
 // `mode: 'new'` always appends a separate booking (e.g. a second client for later dates) — it
 // never touches the existing ones; the overlap check still rejects clashing dates.
-function upsertActiveBooking(site, input, userId, { mode = 'edit' } = {}) {
+function upsertActiveBooking(site, input, userId, { mode = 'edit', bookingId } = {}) {
   if (mode === 'new') {
     const record = buildBookingRecord(site, input, userId, null);
     site.bookings = [...(site.bookings || []), record];
     return record;
   }
-  const activeId = site.mediaStatus === 'booked' ? site.bookingInfo?.bookingId : undefined;
   const bookings = site.bookings || [];
+  // An explicit bookingId edits that booking (e.g. an Upcoming one); otherwise the active booking.
+  if (bookingId) {
+    const target = bookings.find((b) => b.bookingId === bookingId);
+    if (!target || target.status === 'cancelled' || target.status === 'completed') {
+      throw new Error('Only an active or upcoming booking can be edited');
+    }
+  }
+  const activeId = bookingId || (site.mediaStatus === 'booked' ? site.bookingInfo?.bookingId : undefined);
   const existingIndex = activeId ? bookings.findIndex((b) => b.bookingId === activeId) : -1;
   const existing = existingIndex >= 0 ? bookings[existingIndex] : null;
 
@@ -607,7 +617,7 @@ const changeStatus = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error('Site not found');
   }
-  const { mediaStatus, blockReason, blockNotes, bookingInfo, source, cancellationReason, reason, bookingMode } = req.body;
+  const { mediaStatus, blockReason, blockNotes, bookingInfo, source, cancellationReason, reason, bookingMode, bookingId } = req.body;
   const before = site.toObject();
   const beforeBookings = before.bookings || [];
   const beforeStatus = before.mediaStatus;
@@ -635,7 +645,7 @@ const changeStatus = asyncHandler(async (req, res) => {
     cancelledBookings = unblockSite(site, { wasBlocked: beforeStatus === 'blocked', user: req.user });
     if (mediaStatus === 'booked') {
       try {
-        upsertActiveBooking(site, bookingInfo, req.user._id, { mode: bookingMode === 'new' ? 'new' : 'edit' });
+        upsertActiveBooking(site, bookingInfo, req.user._id, { mode: bookingMode === 'new' ? 'new' : 'edit', bookingId });
       } catch (err) {
         res.status(400);
         throw err;
@@ -1099,7 +1109,7 @@ const exportSites = asyncHandler(async (req, res) => {
     ['Generated On', formatIST(now)],
     ['State Filter', req.query.state || 'All'],
     ['City Filter', req.query.city || 'All'],
-    ['Site Owner Filter', req.query.siteOwner || 'All'],
+    ['Site Owner Filter', [].concat(req.query.siteOwner || []).filter(Boolean).join(', ') || 'All'],
     ['Media Status Filter', req.query.mediaStatus || 'All'],
     ['Active Status Filter', activeStatusFilterLabel],
     ['Search Filter', req.query.search || 'None'],
@@ -1226,7 +1236,7 @@ const exportTimeline = asyncHandler(async (req, res) => {
     ['To Date', req.query.to ? formatIST(req.query.to) : 'All'],
     ['State Filter', req.query.state || 'All'],
     ['City Filter', req.query.city || 'All'],
-    ['Site Owner Filter', req.query.siteOwner || 'All'],
+    ['Site Owner Filter', [].concat(req.query.siteOwner || []).filter(Boolean).join(', ') || 'All'],
     ['Status Filter', req.query.mediaStatus || 'All'],
     ['Active Status Filter', activeStatusFilterLabel],
     ['Search Filter', req.query.search || 'None'],

@@ -6,8 +6,10 @@ const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 
 // Centralized status-period writer, reused by /sites create/update/status-change and
 // /inventory row + bulk updates so every source produces identical timeline behaviour.
-async function recordStatusPeriod({ site, previousStatus, source, userId }) {
-  const now = nowIST();
+// `effectiveAt` backdates a non-booked change to when it really happened (the scheduler passes 12:01 AM
+// after an expired booking's end date); omitted, the change is stamped now.
+async function recordStatusPeriod({ site, previousStatus, source, userId, effectiveAt }) {
+  const now = effectiveAt || nowIST();
   const newStatus = site.mediaStatus;
 
   const effectiveFrom = newStatus === 'booked' && site.bookingInfo?.startDate ? new Date(site.bookingInfo.startDate) : now;
@@ -168,11 +170,17 @@ function bookingRowChanged(existing, update) {
 // (available/blocked) rows have no lifecycle.
 function computeBookingLifecycle(item) {
   if (item.status !== 'booked') return null;
-  const now = Date.now();
-  const start = item.effectiveFrom ? new Date(item.effectiveFrom).getTime() : null;
-  const end = item.effectiveTo ? new Date(item.effectiveTo).getTime() : null;
-  if (start != null && now < start) return 'upcoming';
-  if (end != null && now > end) return 'completed';
+  // Compare IST calendar days (booking dates are date-only at UTC midnight), so the end date itself
+  // still counts as active and the switch happens at IST midnight.
+  const day = (v) => {
+    const d = new Date(v);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  };
+  const today = day(nowIST());
+  const start = item.effectiveFrom ? day(item.effectiveFrom) : null;
+  const end = item.effectiveTo ? day(item.effectiveTo) : null;
+  if (start != null && today < start) return 'upcoming';
+  if (end != null && today > end) return 'completed';
   return 'active';
 }
 
