@@ -48,7 +48,7 @@ const createBooking = asyncHandler(async (req, res) => {
   }
 
   const siteDocs = await Site.find({ _id: { $in: sites } });
-  const unavailable = siteDocs.filter((s) => s.mediaStatus !== 'available');
+  const unavailable = siteDocs.filter((s) => s.mediaStatus !== 'immediate');
   if (unavailable.length > 0) {
     res.status(400);
     throw new Error(
@@ -107,7 +107,7 @@ const cancelBooking = asyncHandler(async (req, res) => {
 
   await Site.updateMany(
     { _id: { $in: booking.sites }, 'bookingInfo.booking': booking._id },
-    { $set: { mediaStatus: 'available' }, $unset: { bookingInfo: '' } }
+    { $set: { mediaStatus: 'immediate' }, $unset: { bookingInfo: '' } }
   );
 
   res.json(booking);

@@ -9,15 +9,19 @@ const { formatIST } = require('../utils/formatDate');
 const InventoryHistory = require('../models/InventoryHistory');
 const { recordStatusPeriod, buildOverlapFilter, syncBookingTimelineRecords, computeBookingLifecycle } = require('../services/inventoryTimeline');
 const { genBookingId, resolveSiteStatus } = require('../services/bookingScheduler');
+const { illuminationLabel } = require('../utils/illuminationLabel');
+const { MEDIA_STATUSES, DATED_STATUSES, MANUAL_STATUSES, normalizeStatus } = require('../config/siteStatus');
 
 const IST_OFFSET_MS = 330 * 60000;
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 
 const TRACKED_FIELDS = [
   'mediaId', 'mediaType', 'quantity', 'state', 'city', 'location', 'areaName', 'locationDetails', 'siteOwner',
+  'trafficViewFrom', 'trafficViewTo', 'specification',
   'latitude', 'longitude', 'illumination', 'width', 'height', 'sizeUnit', 'amount', 'gstAmount',
   'monthlyAmount', 'printingCost', 'mountingCost', 'totalCost', 'mediaImage', 'isActive', 'mediaStatus',
-  'blockInfo.reason', 'blockInfo.notes',
+  'blockInfo.reason', 'blockInfo.notes', 'blockInfo.customerName', 'blockInfo.startDate', 'blockInfo.endDate',
+  'statusInfo.reason', 'statusInfo.notes',
 ];
 
 function getPath(obj, path) {
@@ -101,21 +105,20 @@ const utcDay = (value) => {
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
 };
 
-// Leaving the Blocked state (to Booked or Available). Must run BEFORE resolveSiteStatus, which
+// Leaving the Blocked state (to any other status). Must run BEFORE resolveSiteStatus, which
 // deliberately leaves blocked sites untouched — otherwise a blocked site could never be
 // re-booked or made available again.
 //
 // Blocking interrupts whatever booking was running, so the booking that covers TODAY is ended
 // (recorded as cancelled) on the way out — otherwise status recomputation would silently flip
-// the site back to Booked on "Available", and a new booking entered on "Booked" would be
+// the site back to Booked on "Immediate", and a new booking entered on "Booked" would be
 // rejected as overlapping it. Future (upcoming) bookings are kept.
 // `wasBlocked` must come from the saved (before) state, never from stale fields on the doc.
 // Returns the bookings it cancelled so the caller can log them.
 function unblockSite(site, { wasBlocked, user, cancelCurrentBooking = true }) {
   if (!wasBlocked) return [];
-  site.mediaStatus = 'available';
+  site.mediaStatus = 'immediate';
   site.blockInfo = undefined;
-  site.isActive = true;
 
   if (!cancelCurrentBooking) return [];
   const today = utcDay(new Date());
@@ -129,6 +132,93 @@ function unblockSite(site, { wasBlocked, user, cancelCurrentBooking = true }) {
   }
   if (cancelled.length) site.markModified('bookings');
   return cancelled;
+}
+
+// Request fields carrying the details of a manual status.
+const STATUS_INPUT_KEYS = [
+  'blockReason', 'blockNotes', 'blockCustomerType', 'blockClient', 'blockStartDate', 'blockEndDate',
+  'statusReason', 'statusNotes',
+];
+function pickStatusInput(body) {
+  return Object.fromEntries(STATUS_INPUT_KEYS.map((k) => [k, body[k]]));
+}
+
+const dayKey = (value) => (value ? new Date(value).toISOString().slice(0, 10) : '');
+
+// The message for a booking date range that runs into the site's Blocked/Confirmed period (bookings
+// and those periods never overlap).
+function blockOverlapMessage(block, startDate, endDate) {
+  if (!block?.startDate || !block?.endDate || !startDate || !endDate) return null;
+  const clash = new Date(startDate) <= new Date(block.endDate) && new Date(endDate) >= new Date(block.startDate);
+  const what = block.kind === 'confirmed' ? 'confirmed' : 'blocked';
+  return clash ? `This site is ${what} from ${formatDateLabel(block.startDate)} to ${formatDateLabel(block.endDate)}.` : null;
+}
+
+// Puts a site (or a new site's payload) into a manual status — Blocked, Confirmed, Hold or Issue —
+// from the request's status details. Returns an error message when a required detail is missing or invalid.
+//   Blocked / Confirmed (same flow, stored in blockInfo with kind = status): Customer Type +
+//            Client/Agency, Start Date, End Date (+ optional Reason). The dates decide when the site actually
+//            has that status (see resolveSiteStatus) — callers run resolveSiteStatus next.
+//   Hold / Issue: Reason (+ notes).
+// When `before` is given and the site already had these exact details, the original record (date/by)
+// is kept, so re-saving the Edit Site form changes nothing.
+async function applyManualStatus(target, status, input, user, before = null) {
+  if (DATED_STATUSES.includes(status)) {
+    const label = status === 'confirmed' ? 'Confirm' : 'Block';
+    const reason = String(input.blockReason || '').trim();
+    const notes = String(input.blockNotes || '').trim();
+    const startDate = String(input.blockStartDate || '').slice(0, 10);
+    const endDate = String(input.blockEndDate || '').slice(0, 10);
+    if (!input.blockClient) return `Customer is required to ${label.toLowerCase()} a site`;
+    if (!startDate || !endDate) return `${label} Start Date and End Date are required`;
+    if (endDate < startDate) return `${label} End Date must be on or after Start Date`;
+
+    const prev = before?.blockInfo;
+    const sameBlock =
+      prev &&
+      (prev.kind || 'blocked') === status &&
+      String(prev.client || '') === String(input.blockClient) &&
+      dayKey(prev.startDate) === startDate &&
+      dayKey(prev.endDate) === endDate &&
+      (prev.reason || '') === reason &&
+      (prev.notes || '') === notes;
+    if (sameBlock) {
+      target.blockInfo = prev;
+    } else {
+      // An already-running period keeps its (past) Start Date when edited (or turned from Blocked into
+      // Confirmed); a new one can't start in the past.
+      if (startDate < todayDateOnly() && dayKey(prev?.startDate) !== startDate) return `${label} Start Date cannot be before today.`;
+      const overlap = findOverlappingBooking(target.bookings, startDate, endDate);
+      if (overlap) {
+        return `This site is booked from ${formatDateLabel(overlap.startDate)} to ${formatDateLabel(overlap.endDate)} — the ${label.toLowerCase()} dates can't overlap a booking.`;
+      }
+      const client = await Client.findById(input.blockClient).select('name customerType').lean();
+      if (!client) return 'Selected customer could not be found';
+      target.blockInfo = {
+        kind: status,
+        reason,
+        notes,
+        customerType: input.blockCustomerType === 'agency' || client.customerType === 'agency' ? 'agency' : 'client',
+        client: client._id,
+        customerName: client.name,
+        startDate,
+        endDate,
+        blockedDate: nowIST(),
+        blockedBy: user._id,
+      };
+    }
+    target.statusInfo = undefined;
+  } else {
+    const reason = String(input.statusReason || '').trim();
+    const notes = String(input.statusNotes || '').trim();
+    if (!reason) return `${status === 'hold' ? 'Hold' : 'Issue'} reason is required`;
+    const prev = before?.mediaStatus === status ? before.statusInfo : null;
+    const sameInfo = prev && (prev.reason || '') === reason && (prev.notes || '') === notes;
+    target.statusInfo = sameInfo ? prev : { reason, notes, date: nowIST(), by: user._id };
+    target.blockInfo = undefined;
+  }
+  target.mediaStatus = status;
+  return null;
 }
 
 // Bookings made from the status popup may arrive with only a client id. Store the client's name
@@ -188,7 +278,14 @@ const buildFilter = (query) => {
   if (query.mediaType) filter.mediaType = new RegExp(`^${escapeRegex(String(query.mediaType).trim())}$`, 'i');
   if (query.state) filter.state = new RegExp(`^${escapeRegex(query.state.trim())}$`, 'i');
   if (query.city) filter.city = new RegExp(escapeRegex(query.city.trim()), 'i');
-  if (query.mediaStatus) filter.mediaStatus = query.mediaStatus;
+  // Case-insensitive; "Non Lit" also matches older sites saved as "Not Lit" (same thing).
+  if (query.illumination) {
+    const value = String(query.illumination).trim();
+    filter.illumination = /^non\s*-?\s*lit$/i.test(value) ? /^\s*no[nt]\s*-?\s*lit\s*$/i : new RegExp(`^\\s*${escapeRegex(value)}\\s*$`, 'i');
+  }
+  if (query.mediaStatus) filter.mediaStatus = normalizeStatus(query.mediaStatus);
+  // Client Proposal site list: every status shows; only Inactive sites are left out.
+  if (query.proposalListing === 'true') filter.isActive = true;
   // One owner (?siteOwner=A) or several (?siteOwner[]=A&siteOwner[]=B) — a site matches any of them.
   const owners = [].concat(query.siteOwner || []).filter(Boolean);
   if (owners.length) filter.siteOwner = owners.length === 1 ? owners[0] : { $in: owners };
@@ -204,8 +301,12 @@ const buildFilter = (query) => {
 // Each page orders by its own timestamp: the Inventory page passes `sortBy=inventory` (latest
 // status/booking/block change first); everything else — the Sites page — orders by the latest
 // master-data edit (`updatedAt`). The two never mix.
+// On both pages Active sites come first and Inactive sites go to the end of the list (isActive -1 =
+// true before false); within each group the order is unchanged.
 function siteListSort(query) {
-  return query.sortBy === 'inventory' ? { inventoryUpdatedAt: -1, _id: -1 } : { updatedAt: -1, _id: -1 };
+  return query.sortBy === 'inventory'
+    ? { isActive: -1, inventoryUpdatedAt: -1, _id: -1 }
+    : { isActive: -1, updatedAt: -1, _id: -1 };
 }
 
 const getSites = asyncHandler(async (req, res) => {
@@ -222,7 +323,7 @@ const getSites = asyncHandler(async (req, res) => {
 });
 
 const getAvailableSites = asyncHandler(async (req, res) => {
-  const filter = { ...buildFilter(req.query), mediaStatus: 'available', isActive: true };
+  const filter = { ...buildFilter(req.query), mediaStatus: 'immediate', isActive: true };
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(100, Number(req.query.limit) || 20);
 
@@ -261,7 +362,9 @@ function validateSitePayload(body) {
   if (body.longitude !== undefined && body.longitude !== '' && (isNaN(num(body.longitude)) || num(body.longitude) < -180 || num(body.longitude) > 180)) {
     errors.push('Longitude must be between -180 and 180');
   }
-  if (body.mediaStatus && !['available', 'booked', 'blocked'].includes(body.mediaStatus)) {
+  // Add/Edit Site always send it; blank isn't allowed.
+  if (!String(body.specification ?? '').trim()) errors.push('Specification is required');
+  if (body.mediaStatus && !MEDIA_STATUSES.includes(body.mediaStatus)) {
     errors.push('Invalid media status');
   }
   return errors;
@@ -269,6 +372,9 @@ function validateSitePayload(body) {
 
 function normalizeSiteBody(body) {
   const payload = { ...body };
+  if (payload.mediaStatus) payload.mediaStatus = normalizeStatus(payload.mediaStatus);
+  // multipart/form-data sends booleans as strings.
+  if (typeof payload.isActive === 'string') payload.isActive = payload.isActive !== 'false';
   if (payload.mediaCode && !payload.mediaId) payload.mediaId = payload.mediaCode;
   delete payload.mediaCode;
   // multipart/form-data (used by Add/Edit Site so the image uploads in the same request)
@@ -312,10 +418,68 @@ function extractUploadedFile(req) {
   return null;
 }
 
+const MAX_SITE_IMAGE_BYTES = 5 * 1024 * 1024;
+
+// All images saved for a site. Sites from before the multi-image gallery only have mediaImage.
+function siteGallery(site) {
+  if (!site) return [];
+  const list = Array.isArray(site.mediaImages) ? [...site.mediaImages] : [];
+  if (site.mediaImage && !list.includes(site.mediaImage)) list.unshift(site.mediaImage);
+  return list;
+}
+
+// Add/Edit Site's multi-image gallery. The form sends:
+//   imageGallery  — marker that this request carries the full gallery
+//   keepImages    — JSON array of already-saved image URLs to keep, in display order
+//   mediaImages[] — newly picked files, appended after the kept images
+//   defaultImage  — a kept URL, or "new:<n>" for the n-th new file
+// Images left out of keepImages are removed from the site. mediaImage is set to the default.
+async function applyImageGallery(payload, req, existingSite) {
+  const previous = siteGallery(existingSite);
+  let keep = [];
+  try {
+    keep = JSON.parse(payload.keepImages || '[]');
+  } catch {
+    keep = [];
+  }
+  // Only URLs already on this site can be kept — never arbitrary URLs from the client.
+  keep = (Array.isArray(keep) ? keep : []).filter((url) => previous.includes(url));
+
+  // Site images: PNG / JPG / JPEG only, 5MB each — checked before anything is uploaded.
+  const files = req.files?.mediaImages || [];
+  for (const file of files) {
+    if (!/^image\/(jpeg|png)$/.test(file.mimetype) || !/\.(png|jpe?g)$/i.test(file.originalname)) {
+      req.res.status(400);
+      throw new Error(`${file.originalname}: only PNG, JPG or JPEG images are allowed`);
+    }
+    if (file.size > MAX_SITE_IMAGE_BYTES) {
+      req.res.status(400);
+      throw new Error(`${file.originalname}: image must be 5MB or smaller`);
+    }
+  }
+  const uploaded = [];
+  for (const file of files) uploaded.push(await saveMediaImage(file));
+
+  const gallery = [...keep, ...uploaded];
+  const requested = String(payload.defaultImage || '');
+  const chosen = requested.startsWith('new:') ? uploaded[Number(requested.slice(4))] : gallery.includes(requested) ? requested : undefined;
+
+  payload.mediaImages = gallery;
+  payload.mediaImage = chosen || gallery[0] || '';
+  delete payload.imageGallery;
+  delete payload.keepImages;
+  delete payload.defaultImage;
+}
+
 // Uploads the newly selected image (if any) via the existing storage logic and sets
 // payload.mediaImage to its public URL. If no new file was sent, mediaImage is left
 // untouched so an update never clears/overwrites the site's existing image.
-async function applyUploadedImage(payload, req) {
+async function applyUploadedImage(payload, req, existingSite = null) {
+  if (payload.imageGallery !== undefined) {
+    await applyImageGallery(payload, req, existingSite);
+    return;
+  }
+  delete payload.mediaImages;
   const file = extractUploadedFile(req);
   if (file) {
     payload.mediaImage = await saveMediaImage(file);
@@ -340,6 +504,8 @@ function buildBookingRecord(site, input, userId, existingBooking) {
   if (overlap) {
     throw new Error(`This site is already booked from ${formatDateLabel(overlap.startDate)} to ${formatDateLabel(overlap.endDate)}.`);
   }
+  const blockClash = blockOverlapMessage(site.blockInfo, startDate, endDate);
+  if (blockClash) throw new Error(blockClash);
 
   const durationDays = calcDurationDays(startDate, endDate);
   const monthlyTotalCost = site.totalCost || site.monthlyAmount || 0;
@@ -410,6 +576,8 @@ function buildBookingsArray(site, incomingBookings, userId) {
     if (overlap) {
       throw new Error(`This site is already booked from ${formatDateLabel(overlap.startDate)} to ${formatDateLabel(overlap.endDate)}.`);
     }
+    const blockClash = blockOverlapMessage(site.blockInfo, input.startDate, input.endDate);
+    if (blockClash) throw new Error(blockClash);
     if (!input.client) throw new Error('Customer is required for every booking');
     if (!input.startDate || !input.endDate) throw new Error('Start Date and End Date are required for every booking');
     if (new Date(input.endDate) < new Date(input.startDate)) throw new Error('End Date must be on or after Start Date');
@@ -454,24 +622,27 @@ const createSite = asyncHandler(async (req, res) => {
   payload.createdBy = req.user._id;
   payload.updatedBy = userName;
   payload.inventoryUpdatedBy = userName;
-  if (!payload.mediaStatus) payload.mediaStatus = 'available';
+  if (!payload.mediaStatus) payload.mediaStatus = 'immediate';
   if (!payload.illumination) payload.illumination = 'Front Lit';
+  if (payload.isActive === undefined) payload.isActive = true;
 
-  const { blockReason, blockNotes, bookingInfo, bookings: incomingBookings } = payload;
-  delete payload.blockReason;
-  delete payload.blockNotes;
+  const { bookingInfo, bookings: incomingBookings } = payload;
+  const statusInput = pickStatusInput(payload);
+  STATUS_INPUT_KEYS.forEach((k) => delete payload[k]);
   delete payload.bookingInfo;
   delete payload.bookings;
 
   Site.applyComputedFields(payload);
 
-  if (payload.mediaStatus === 'blocked') {
-    if (!blockReason) {
+  // A site added as Inactive is always Immediate (no block/booking/hold details apply).
+  if (payload.isActive === false) payload.mediaStatus = 'immediate';
+
+  if (MANUAL_STATUSES.includes(payload.mediaStatus)) {
+    const statusError = await applyManualStatus(payload, payload.mediaStatus, statusInput, req.user);
+    if (statusError) {
       res.status(400);
-      throw new Error('Block reason is required');
+      throw new Error(statusError);
     }
-    payload.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
-    payload.isActive = false;
   } else if (payload.mediaStatus === 'booked') {
     const bookingList = Array.isArray(incomingBookings) && incomingBookings.length ? incomingBookings : bookingInfo ? [bookingInfo] : [];
     if (!bookingList.length) {
@@ -484,9 +655,6 @@ const createSite = asyncHandler(async (req, res) => {
       res.status(400);
       throw err;
     }
-    payload.isActive = true;
-  } else {
-    payload.isActive = true;
   }
 
   let site;
@@ -501,7 +669,7 @@ const createSite = asyncHandler(async (req, res) => {
   }
 
   // The live status must reflect TODAY against the booking dates just saved — a booking
-  // starting in the future keeps the site Available until its start date arrives.
+  // starting in the future keeps the site Immediate until its start date arrives.
   resolveSiteStatus(site);
   await site.save();
 
@@ -522,35 +690,51 @@ const updateSite = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error(errors.join('; '));
   }
-  await applyUploadedImage(payload, req);
+  await applyUploadedImage(payload, req, site);
   const before = site.toObject();
   const beforeBookings = before.bookings || [];
   const beforeStatus = before.mediaStatus;
   const beforeBookingId = before.bookingInfo?.bookingId;
 
-  const { blockReason, blockNotes, bookingInfo, bookings: incomingBookings, ...siteFields } = payload;
+  const { bookingInfo, bookings: incomingBookings, ...siteFields } = payload;
+  const statusInput = pickStatusInput(payload);
+  STATUS_INPUT_KEYS.forEach((k) => delete siteFields[k]);
   let unblockCancelled = [];
   site.$locals.currentUserName = req.user?.name || 'System';
+  site.$locals.changeSource = 'sites';
   Object.assign(site, siteFields);
   Site.applyComputedFields(site);
 
-  if (site.mediaStatus === 'blocked') {
-    if (!blockReason) {
+  if (site.isActive === false) {
+    // Inactive: status goes to Immediate — any Blocked/Confirmed period or Hold/Issue reason is
+    // dropped; bookings are kept but don't count while Inactive (see resolveSiteStatus).
+    resolveSiteStatus(site);
+  } else if (MANUAL_STATUSES.includes(site.mediaStatus)) {
+    const targetStatus = site.mediaStatus;
+    // Blocked -> another manual status ends the booking the block interrupted, as for Immediate.
+    if (DATED_STATUSES.includes(beforeStatus) && targetStatus !== beforeStatus) {
+      unblockCancelled = unblockSite(site, { wasBlocked: true, user: req.user });
+    }
+    // Re-saving with the same status and details keeps the original record (date/by).
+    const statusError = await applyManualStatus(site, targetStatus, statusInput, req.user, before);
+    if (statusError) {
       res.status(400);
-      throw new Error('Block reason is required');
+      throw new Error(statusError);
     }
-    // Re-saving an already-blocked site from Edit Site keeps its original block record (date/by)
-    // unless the reason or notes were actually changed.
-    const sameBlock =
-      before.mediaStatus === 'blocked' &&
-      before.blockInfo?.reason === blockReason &&
-      (before.blockInfo?.notes || '') === (blockNotes || '');
-    if (!sameBlock) {
-      site.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
-    }
-    site.isActive = false;
+    // A block's own dates decide whether the site is Blocked yet (a future block leaves it as it is).
+    resolveSiteStatus(site);
   } else {
     const targetStatus = site.mediaStatus;
+    // Coming out of an active block. → Immediate: the booking that was running when the site got
+    // blocked ends, so the site really becomes Immediate. → Booked: the form's booking rows (which
+    // the user sees and edits) are the source of truth, so nothing is auto-cancelled. Runs before
+    // the bookings are rebuilt so they're not checked against the block being left. A block
+    // scheduled ahead (site not Blocked yet) is kept.
+    unblockCancelled = unblockSite(site, {
+      wasBlocked: DATED_STATUSES.includes(beforeStatus),
+      user: req.user,
+      cancelCurrentBooking: targetStatus !== 'booked',
+    });
     const bookingList = Array.isArray(incomingBookings) ? incomingBookings : bookingInfo ? [bookingInfo] : null;
     if (targetStatus === 'booked' && bookingList) {
       try {
@@ -560,14 +744,8 @@ const updateSite = asyncHandler(async (req, res) => {
         throw err;
       }
     }
-    // Coming out of Blocked. → Available: the booking that was running when the site got blocked
-    // ends, so the site really becomes Available. → Booked: the form's booking rows (which the
-    // user sees and edits) are the source of truth, so nothing is auto-cancelled.
-    unblockCancelled = unblockSite(site, {
-      wasBlocked: beforeStatus === 'blocked',
-      user: req.user,
-      cancelCurrentBooking: targetStatus !== 'booked',
-    });
+    // Leaving Hold / Issue drops their details.
+    site.statusInfo = undefined;
     // Live status/bookingInfo always get recomputed from the (possibly just-edited)
     // bookings array against today's date — never taken at face value from the toggle.
     resolveSiteStatus(site);
@@ -601,6 +779,32 @@ const updateSite = asyncHandler(async (req, res) => {
   res.json({ ...site.toObject(), mediaCode: site.mediaId });
 });
 
+// Active/Inactive switch from the Media Master list — changes only isActive (status, bookings and
+// details are untouched) and records it in the site's edit history.
+const setSiteActive = asyncHandler(async (req, res) => {
+  const site = await Site.findById(req.params.id);
+  if (!site) {
+    res.status(404);
+    throw new Error('Site not found');
+  }
+  if (typeof req.body.isActive !== 'boolean') {
+    res.status(400);
+    throw new Error('isActive must be true or false');
+  }
+  const before = site.toObject();
+  site.isActive = req.body.isActive;
+  // Inactive -> Immediate right away (block/confirm/hold/issue dropped, bookings kept);
+  // Active again -> status recomputed from its bookings.
+  resolveSiteStatus(site);
+  site.$locals.currentUserName = req.user?.name || 'System';
+  await site.save();
+  if (before.mediaStatus !== site.mediaStatus || before.bookingInfo?.bookingId !== site.bookingInfo?.bookingId) {
+    await recordStatusPeriod({ site, previousStatus: before.mediaStatus, source: 'sites', userId: req.user._id });
+  }
+  await logFieldChanges(site._id, before, site.toObject(), req.user._id, nowIST());
+  res.json({ ...site.toObject(), mediaCode: site.mediaId });
+});
+
 const deleteSite = asyncHandler(async (req, res) => {
   const site = await Site.findById(req.params.id);
   if (!site) {
@@ -617,32 +821,43 @@ const changeStatus = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error('Site not found');
   }
-  const { mediaStatus, blockReason, blockNotes, bookingInfo, source, cancellationReason, reason, bookingMode, bookingId } = req.body;
+  const { bookingInfo, source, cancellationReason, reason, bookingMode, bookingId } = req.body;
+  const mediaStatus = normalizeStatus(req.body.mediaStatus);
   const before = site.toObject();
   const beforeBookings = before.bookings || [];
   const beforeStatus = before.mediaStatus;
   const beforeBookingId = before.bookingInfo?.bookingId;
 
-  if (!['available', 'booked', 'blocked'].includes(mediaStatus)) {
+  if (!MEDIA_STATUSES.includes(mediaStatus)) {
     res.status(400);
     throw new Error('Invalid media status');
+  }
+  if (site.isActive === false) {
+    res.status(400);
+    throw new Error('This site is Inactive — make it Active before changing its status.');
   }
 
   let cancelledBookings = [];
 
-  if (mediaStatus === 'blocked') {
-    if (!blockReason) {
-      res.status(400);
-      throw new Error('Block reason is required');
+  if (MANUAL_STATUSES.includes(mediaStatus)) {
+    if (DATED_STATUSES.includes(beforeStatus) && mediaStatus !== beforeStatus) {
+      cancelledBookings = unblockSite(site, { wasBlocked: true, user: req.user });
     }
-    site.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
-    site.mediaStatus = 'blocked';
-    site.isActive = false;
+    const statusError = await applyManualStatus(site, mediaStatus, pickStatusInput(req.body), req.user, before);
+    if (statusError) {
+      res.status(400);
+      throw new Error(statusError);
+    }
+    // A block's own dates decide whether the site is Blocked yet (a future block leaves it as it is).
+    resolveSiteStatus(site);
   } else {
-    // Blocked → Booked/Available: unblock first and end the booking that was running when the
-    // site got blocked — "Available" then really means Available, and "Booked" uses only the
+    // Blocked → Booked/Immediate: unblock first and end the booking that was running when the
+    // site got blocked — "Immediate" then really means Immediate, and "Booked" uses only the
     // new booking details entered now (no overlap with the interrupted booking).
-    cancelledBookings = unblockSite(site, { wasBlocked: beforeStatus === 'blocked', user: req.user });
+    cancelledBookings = unblockSite(site, { wasBlocked: DATED_STATUSES.includes(beforeStatus), user: req.user });
+    site.statusInfo = undefined;
+    // "Immediate" can also drop a block that is scheduled ahead (the popup asks first).
+    if (mediaStatus === 'immediate' && req.body.removeBlock) site.blockInfo = undefined;
     if (mediaStatus === 'booked') {
       try {
         upsertActiveBooking(site, bookingInfo, req.user._id, { mode: bookingMode === 'new' ? 'new' : 'edit', bookingId });
@@ -650,14 +865,14 @@ const changeStatus = asyncHandler(async (req, res) => {
         res.status(400);
         throw err;
       }
-    } else if (mediaStatus === 'available' && beforeStatus === 'booked') {
-      // Going straight from Booked to Available is really "cancel the booking that's currently
+    } else if (mediaStatus === 'immediate' && beforeStatus === 'booked') {
+      // Going straight from Booked to Immediate is really "cancel the booking that's currently
       // making this site Booked" — never a silent status flip. Require and record a reason,
       // and only cancel the ONE booking driving today's live status (not every booking).
       const cancelReason = (cancellationReason || reason || '').trim();
       if (!cancelReason) {
         res.status(400);
-        throw new Error('Cancellation reason is required to change from Booked to Available');
+        throw new Error('Cancellation reason is required to change from Booked to Immediate');
       }
       const activeId = before.bookingInfo?.bookingId;
       const activeBooking = activeId ? (site.bookings || []).find((b) => b.bookingId === activeId) : null;
@@ -675,10 +890,11 @@ const changeStatus = asyncHandler(async (req, res) => {
 
   await fillMissingCustomerNames(site);
   site.$locals.currentUserName = req.user?.name || 'System';
+  const resolvedSource = source === 'inventory' ? 'inventory' : 'sites';
+  site.$locals.changeSource = resolvedSource;
   await site.save();
 
   const statusChanged = beforeStatus !== site.mediaStatus || beforeBookingId !== site.bookingInfo?.bookingId;
-  const resolvedSource = source === 'inventory' ? 'inventory' : 'sites';
   if (statusChanged) {
     // `source` still labels the Timeline entry "via Sites"/"via Inventory" — it no longer
     // decides which timestamp bumps (that's fully data-driven in the Site model now).
@@ -719,6 +935,8 @@ const cancelBooking = asyncHandler(async (req, res) => {
 
   const beforeStatus = site.mediaStatus;
   const beforeBookingId = site.bookingInfo?.bookingId;
+  site.$locals.currentUserName = req.user?.name || 'System';
+  site.$locals.changeSource = req.body.source === 'inventory' ? 'inventory' : 'sites';
 
   applyBookingCancellation(booking, cancelReason, req.user);
   site.markModified('bookings');
@@ -739,19 +957,26 @@ const cancelBooking = asyncHandler(async (req, res) => {
 });
 
 const bulkChangeStatus = asyncHandler(async (req, res) => {
-  const { siteIds, mediaStatus, blockReason, blockNotes, bookingInfo } = req.body;
+  const { siteIds, bookingInfo } = req.body;
+  const mediaStatus = normalizeStatus(req.body.mediaStatus);
+  const statusInput = pickStatusInput(req.body);
   if (!Array.isArray(siteIds) || siteIds.length === 0) {
     res.status(400);
     throw new Error('No sites selected');
   }
-  if (!['available', 'booked', 'blocked'].includes(mediaStatus)) {
+  if (!MEDIA_STATUSES.includes(mediaStatus)) {
     res.status(400);
     throw new Error('Invalid media status');
   }
-  if (mediaStatus === 'blocked' && !blockReason) {
+  if (DATED_STATUSES.includes(mediaStatus) && (!statusInput.blockClient || !statusInput.blockStartDate || !statusInput.blockEndDate)) {
     res.status(400);
-    throw new Error('Block reason is required');
+    throw new Error('Customer, Start Date and End Date are required');
   }
+  if ((mediaStatus === 'hold' || mediaStatus === 'issue') && !String(statusInput.statusReason || '').trim()) {
+    res.status(400);
+    throw new Error(`${mediaStatus === 'hold' ? 'Hold' : 'Issue'} reason is required`);
+  }
+
 
   const sites = await Site.find({ _id: { $in: siteIds } });
   const results = [];
@@ -762,15 +987,26 @@ const bulkChangeStatus = asyncHandler(async (req, res) => {
     const beforeStatus = before.mediaStatus;
     const beforeBookingId = before.bookingInfo?.bookingId;
     let cancelledBookings = [];
+    if (site.isActive === false) {
+      skipped.push({ site: site.mediaId, reason: 'Inactive — make it Active first' });
+      continue;
+    }
 
-    if (mediaStatus === 'blocked') {
-      site.blockInfo = { reason: blockReason, notes: blockNotes, blockedDate: nowIST(), blockedBy: req.user._id };
-      site.mediaStatus = 'blocked';
-      site.isActive = false;
+    if (MANUAL_STATUSES.includes(mediaStatus)) {
+      if (DATED_STATUSES.includes(beforeStatus) && mediaStatus !== beforeStatus) {
+        cancelledBookings = unblockSite(site, { wasBlocked: true, user: req.user });
+      }
+      const statusError = await applyManualStatus(site, mediaStatus, statusInput, req.user, before);
+      if (statusError) {
+        skipped.push({ site: site.mediaId, reason: statusError });
+        continue;
+      }
+      resolveSiteStatus(site);
     } else {
-      // Blocked → Booked/Available: unblock first and end the booking that was running when
+      // Blocked → Booked/Immediate: unblock first and end the booking that was running when
       // the site got blocked (nothing is saved if the new booking below is skipped).
-      cancelledBookings = unblockSite(site, { wasBlocked: beforeStatus === 'blocked', user: req.user });
+      cancelledBookings = unblockSite(site, { wasBlocked: DATED_STATUSES.includes(beforeStatus), user: req.user });
+      site.statusInfo = undefined;
       if (mediaStatus === 'booked') {
         try {
           // Bulk has no per-site booking to edit — always add a separate new booking.
@@ -1006,7 +1242,15 @@ const getTimelineSummary = asyncHandler(async (req, res) => {
   const by = Object.fromEntries(counts.map((c) => [c._id, c.n]));
   const total = counts.reduce((sum, c) => sum + c.n, 0);
 
-  res.json({ total, available: by.available || 0, booked: by.booked || 0, blocked: by.blocked || 0 });
+  res.json({
+    total,
+    immediate: by.immediate || 0,
+    booked: by.booked || 0,
+    blocked: by.blocked || 0,
+    confirmed: by.confirmed || 0,
+    hold: by.hold || 0,
+    issue: by.issue || 0,
+  });
 });
 
 const bulkImport = asyncHandler(async (req, res) => {
@@ -1026,7 +1270,7 @@ const bulkImport = asyncHandler(async (req, res) => {
   const docs = records.map((r) => {
     const doc = {
       ...normalizeSiteBody(r),
-      mediaStatus: r.mediaStatus || 'available',
+      mediaStatus: normalizeStatus(r.mediaStatus) || 'immediate',
       createdBy: req.user._id,
       updatedBy: 'System',
       inventoryUpdatedBy: 'System',
@@ -1049,13 +1293,12 @@ const getSiteOwners = asyncHandler(async (req, res) => {
 
 const getSummary = asyncHandler(async (req, res) => {
   const filter = buildFilter(req.query);
-  const [total, available, booked, blocked] = await Promise.all([
+  const [total, ...counts] = await Promise.all([
     Site.countDocuments(filter),
-    Site.countDocuments({ ...filter, mediaStatus: 'available' }),
-    Site.countDocuments({ ...filter, mediaStatus: 'booked' }),
-    Site.countDocuments({ ...filter, mediaStatus: 'blocked' }),
+    ...MEDIA_STATUSES.map((status) => Site.countDocuments({ ...filter, mediaStatus: status })),
   ]);
-  res.json({ total, available, booked, blocked });
+  // { total, immediate, booked, blocked, confirmed, hold, issue }
+  res.json({ total, ...Object.fromEntries(MEDIA_STATUSES.map((status, i) => [status, counts[i]])) });
 });
 
 const SITE_EXPORT_COLUMNS = [
@@ -1109,6 +1352,7 @@ const exportSites = asyncHandler(async (req, res) => {
     ['Generated On', formatIST(now)],
     ['State Filter', req.query.state || 'All'],
     ['City Filter', req.query.city || 'All'],
+    ['Illumination Filter', req.query.illumination || 'All'],
     ['Site Owner Filter', [].concat(req.query.siteOwner || []).filter(Boolean).join(', ') || 'All'],
     ['Media Status Filter', req.query.mediaStatus || 'All'],
     ['Active Status Filter', activeStatusFilterLabel],
@@ -1152,7 +1396,7 @@ const exportSites = asyncHandler(async (req, res) => {
       siteOwner: s.siteOwner,
       latitude: s.latitude,
       longitude: s.longitude,
-      illumination: s.illumination,
+      illumination: illuminationLabel(s.illumination),
       width: s.width,
       height: s.height,
       autoSize: s.autoSize,
@@ -1352,12 +1596,15 @@ const getCities = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  unblockSite,
+  logBookingCancellation,
   getSites,
   getAvailableSites,
   getSite,
   createSite,
   updateSite,
   deleteSite,
+  setSiteActive,
   changeStatus,
   cancelBooking,
   bulkChangeStatus,

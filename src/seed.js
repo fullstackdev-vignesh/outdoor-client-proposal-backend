@@ -51,7 +51,7 @@ async function run() {
   for (let i = 1; i <= 60; i += 1) {
     const [state, city] = CITIES[i % CITIES.length];
     const statusRoll = i % 5;
-    const mediaStatus = statusRoll === 0 ? 'booked' : statusRoll === 1 ? 'blocked' : 'available';
+    const mediaStatus = statusRoll === 0 ? 'booked' : statusRoll === 1 ? 'blocked' : 'immediate';
     const site = {
       mediaId: `MEDIA-${String(i).padStart(4, '0')}`,
       mediaName: `${MEDIA_TYPES[i % MEDIA_TYPES.length]} ${city} #${i}`,

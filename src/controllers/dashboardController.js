@@ -130,7 +130,7 @@ const getDashboardStats = asyncHandler(async (req, res) => {
     Site.countDocuments(),
     Site.countDocuments({ isActive: true }),
     Site.countDocuments({ isActive: false }),
-    Site.countDocuments({ mediaStatus: 'available' }),
+    Site.countDocuments({ mediaStatus: 'immediate' }),
     Site.countDocuments({ mediaStatus: 'booked' }),
     Site.countDocuments({ mediaStatus: 'blocked' }),
     Client.countDocuments(),
@@ -165,7 +165,14 @@ const getDashboardStats = asyncHandler(async (req, res) => {
       totalProposals,
       totalBookings,
     },
-    mediaStatusSummary: { available: availableMedia, booked: bookedMedia, blocked: blockedMedia },
+    mediaStatusSummary: {
+      immediate: availableMedia,
+      booked: bookedMedia,
+      blocked: blockedMedia,
+      confirmed: await Site.countDocuments({ mediaStatus: 'confirmed' }),
+      hold: await Site.countDocuments({ mediaStatus: 'hold' }),
+      issue: await Site.countDocuments({ mediaStatus: 'issue' }),
+    },
     recent: { sites: recentSites, clients: recentClients, bookings: recentBookings, proposals: recentProposals, users: recentUsers },
   });
 });
@@ -184,9 +191,12 @@ const getReports = asyncHandler(async (req, res) => {
       total: await Site.countDocuments(),
       active: await Site.countDocuments({ isActive: true }),
       inactive: await Site.countDocuments({ isActive: false }),
-      available: await Site.countDocuments({ mediaStatus: 'available' }),
+      immediate: await Site.countDocuments({ mediaStatus: 'immediate' }),
       booked: await Site.countDocuments({ mediaStatus: 'booked' }),
       blocked: await Site.countDocuments({ mediaStatus: 'blocked' }),
+      confirmed: await Site.countDocuments({ mediaStatus: 'confirmed' }),
+      hold: await Site.countDocuments({ mediaStatus: 'hold' }),
+      issue: await Site.countDocuments({ mediaStatus: 'issue' }),
     }))(),
     (async () => ({
       total: totalBookingsAll,

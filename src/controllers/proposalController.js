@@ -79,15 +79,11 @@ const createProposal = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error('One or more selected sites could not be found');
   }
-  // Proposal creation is only for preparing a proposal, not confirming a booking, so a site
-  // being already `booked` (by someone else, for a different date range) must not block it from
-  // being proposed too — only `blocked` sites (explicitly taken out of circulation) are rejected.
-  const blocked = siteDocs.filter((s) => s.mediaStatus === 'blocked');
-  if (blocked.length > 0) {
+  // A proposal can use a site in any status — only Inactive sites are rejected.
+  const inactive = siteDocs.filter((s) => s.isActive === false);
+  if (inactive.length > 0) {
     res.status(400);
-    throw new Error(
-      `The following media cannot be added to a proposal: ${blocked.map((s) => s.mediaName).join(', ')}`
-    );
+    throw new Error(`Inactive sites cannot be added to a proposal: ${inactive.map((s) => s.mediaId || s.mediaName).join(', ')}`);
   }
 
   const proposal = await Proposal.create({

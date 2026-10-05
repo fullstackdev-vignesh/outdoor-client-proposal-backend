@@ -730,6 +730,82 @@ function collapseSecondaryRows(sheetXml, cfg, usableCount) {
   return sheetXml;
 }
 
+// Shifts every column reference in formula text (and shared-formula `ref` ranges) that points at
+// or past column `fromNum` by `delta` — needed when moving columns, because removeColumns /
+// insertColumnBefore only move cell ADDRESSES and never rewrite formula text.
+function shiftFormulaColumns(sheetXml, fromNum, delta) {
+  const shiftRef = (text) =>
+    text.replace(/(\$?)([A-Z]{1,3})(\$?)(\d+)/g, (m, d1, col, d2, row) => {
+      const n = colToNum(col);
+      return n >= fromNum ? `${d1}${numToCol(n + delta)}${d2}${row}` : m;
+    });
+  return sheetXml
+    .replace(/<f([^>]*?)(\/?)>/g, (m, attrs, selfClose) => `<f${attrs.replace(/ref="([^"]+)"/, (r, ref) => `ref="${shiftRef(ref)}"`)}${selfClose}>`)
+    .replace(/(<f[^>]*>)([^<]*)(<\/f>)/g, (m, open, text, close) => `${open}${shiftRef(text)}${close}`);
+}
+
+// Last column of the table, judged by the furthest header cell that actually holds text/a value.
+function lastHeaderColumn(sheetXml, headerRow) {
+  const row = extractRow(sheetXml, headerRow);
+  let max = 0;
+  for (const m of (row || '').matchAll(/<c r="([A-Z]+)\d+"[^/>]*>([\s\S]*?)<\/c>/g)) {
+    if (/<v>|<is>/.test(m[2])) max = Math.max(max, colToNum(m[1]));
+  }
+  return max;
+}
+
+// Moves the Latitude/Longitude columns (inserted after Location by applyFixedExtraColumns, so every
+// other config letter stays valid) to the very end of the table, after all fee/total columns —
+// run last, once the sheet's final layout is settled. Cells keep their own values and styles; the
+// header merges and column widths go with them; every formula is shifted to match.
+function moveLatLngToEnd(sheetXml, cfg) {
+  const latNum = colToNum(cfg.columns.latitude);
+  const lngNum = colToNum(cfg.columns.longitude);
+  if (lngNum !== latNum + 1) return sheetXml;
+  const headerRow = cfg.fixedExtraColumnHeaderRow || 1;
+  const lastNum = lastHeaderColumn(sheetXml, headerRow);
+  if (lastNum <= lngNum) return sheetXml; // already last
+
+  // 1. Remember the two columns' cells, header merges and widths.
+  const saved = []; // { row, offset (0 = lat, 1 = lng), attrs, tail }
+  for (const m of sheetXml.matchAll(/<c r="([A-Z]+)(\d+)"([^/>]*)(\/>|>[\s\S]*?<\/c>)/g)) {
+    const n = colToNum(m[1]);
+    if (n === latNum || n === lngNum) saved.push({ row: Number(m[2]), offset: n - latNum, attrs: m[3], tail: m[4] });
+  }
+  const merges = [...sheetXml.matchAll(/<mergeCell ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"\/>/g)]
+    .filter((m) => m[1] === m[3] && (colToNum(m[1]) === latNum || colToNum(m[1]) === lngNum))
+    .map((m) => ({ offset: colToNum(m[1]) - latNum, r1: m[2], r2: m[4] }));
+  const widths = [latNum, lngNum].map((n) => {
+    for (const m of sheetXml.matchAll(/<col ([^>]*)\/>/g)) {
+      if (m[1].includes(`min="${n}"`) && m[1].includes(`max="${n}"`)) return Number((m[1].match(/width="([\d.]+)"/) || [])[1]) || 11;
+    }
+    return 11;
+  });
+
+  // 2. Take them out — everything to their right moves left by two (formulas included).
+  sheetXml = removeColumns(sheetXml, [cfg.columns.latitude, cfg.columns.longitude]);
+  sheetXml = shiftFormulaColumns(sheetXml, lngNum + 1, -2);
+
+  // 3. Open two columns right after the (shifted) last table column and put them back there.
+  const newLatNum = lastNum - 1;
+  const newLat = numToCol(newLatNum);
+  sheetXml = shiftFormulaColumns(sheetXml, newLatNum, 2);
+  sheetXml = insertColumnBefore(sheetXml, newLat);
+  sheetXml = insertColumnBefore(sheetXml, newLat);
+  for (const c of saved) {
+    const ref = `${numToCol(newLatNum + c.offset)}${c.row}`;
+    sheetXml = insertCellInRow(sheetXml, c.row, ref, `<c r="${ref}"${c.attrs}${c.tail}`);
+  }
+  for (const mg of merges) {
+    const col = numToCol(newLatNum + mg.offset);
+    sheetXml = addMergeCell(sheetXml, `${col}${mg.r1}:${col}${mg.r2}`);
+  }
+  widths.forEach((w, i) => {
+    sheetXml = setColumnWidth(sheetXml, numToCol(newLatNum + i), w, getColStyle(sheetXml, newLatNum - 1));
+  });
+  return sheetXml;
+}
+
 /**
  * Populates a COPY of an Excel master template with proposal rows, leaving all worksheet
  * styling/formulas untouched, moves the template's OWN predefined final total row (already
@@ -862,6 +938,11 @@ async function generateExcelFromTemplate(rows, { buffer, config, client } = {}) 
     }
   } else if (cfg.removeColumns?.length) {
     sheetXml = removeColumns(sheetXml, cfg.removeColumns);
+  }
+
+  // Latitude/Longitude are shown as the last two columns of every format.
+  if (usable.length && cfg.columns.latitude && cfg.columns.longitude) {
+    sheetXml = moveLatLngToEnd(sheetXml, cfg);
   }
 
   // Indian comma-grouped display (e.g. 1000000 -> "10,00,000") for whichever style ids the

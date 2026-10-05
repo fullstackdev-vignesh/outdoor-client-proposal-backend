@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { MEDIA_STATUSES } = require('../config/siteStatus');
 
 const IST_OFFSET_MS = 330 * 60000;
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
@@ -55,10 +56,31 @@ const bookingRecordSchema = new mongoose.Schema(
   { _id: false }
 );
 
-const blockInfoSchema = new mongoose.Schema(
+// Details for the Hold / Issue statuses (Blocked keeps its own blockInfo).
+const statusInfoSchema = new mongoose.Schema(
   {
     reason: String,
     notes: String,
+    date: { type: Date, default: nowIST },
+    by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  },
+  { _id: false }
+);
+
+// A Blocked or Confirmed period for one customer over its own date range (`kind` says which).
+// startDate/endDate are date-only (UTC midnight, same as bookings): the site has that status from
+// the Start Date through the End Date, and the period may be scheduled ahead. Older blocks have no
+// dates and stay Blocked until changed by hand.
+const blockInfoSchema = new mongoose.Schema(
+  {
+    kind: { type: String, enum: ['blocked', 'confirmed'], default: 'blocked' },
+    reason: String,
+    notes: String,
+    customerType: { type: String, enum: ['client', 'agency'] },
+    client: { type: mongoose.Schema.Types.ObjectId, ref: 'Client' },
+    customerName: String,
+    startDate: Date,
+    endDate: Date,
     blockedDate: { type: Date, default: nowIST },
     blockedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   },
@@ -68,14 +90,16 @@ const blockInfoSchema = new mongoose.Schema(
 // Fields that represent Site MASTER data — changing any of these bumps `updatedAt` only.
 const MASTER_FIELDS = [
   'mediaId', 'mediaName', 'mediaType', 'quantity', 'state', 'city', 'location', 'areaName',
-  'locationDetails', 'siteOwner', 'latitude', 'longitude', 'illumination', 'width', 'height',
+  'locationDetails', 'trafficViewFrom', 'trafficViewTo', 'specification', 'siteOwner', 'latitude', 'longitude', 'illumination', 'width', 'height',
   'sizeUnit', 'autoSize', 'amount', 'gstAmount', 'monthlyAmount', 'printingCost', 'mountingCost',
-  'totalCost', 'mediaImage', 'siteInfoId',
+  'totalCost', 'mediaImage', 'mediaImages', 'siteInfoId',
+  // Active/Inactive is the site's own setting (changed in Site Management), not inventory state.
+  'isActive',
 ];
 
 // Fields that represent live Inventory/status/booking state — changing any of these bumps
 // `inventoryUpdatedAt` only. A single save can bump BOTH if it touches both groups.
-const INVENTORY_FIELDS = ['mediaStatus', 'bookingInfo', 'bookings', 'blockInfo', 'isActive'];
+const INVENTORY_FIELDS = ['mediaStatus', 'bookingInfo', 'bookings', 'blockInfo', 'statusInfo'];
 
 const siteSchema = new mongoose.Schema(
   {
@@ -88,6 +112,11 @@ const siteSchema = new mongoose.Schema(
     location: { type: String, trim: true },
     areaName: { type: String, trim: true },
     locationDetails: { type: String, trim: true },
+    // Traffic direction the site faces, e.g. "Madurai" -> "Trichy".
+    trafficViewFrom: { type: String, trim: true },
+    trafficViewTo: { type: String, trim: true },
+    // Size as shown to clients, e.g. "30 x 20" — filled from Width x Height in the form but editable.
+    specification: { type: String, trim: true },
     siteOwner: { type: String, trim: true, index: true },
     latitude: { type: Number, min: -90, max: 90 },
     longitude: { type: Number, min: -180, max: 180 },
@@ -102,7 +131,10 @@ const siteSchema = new mongoose.Schema(
     printingCost: { type: Number, min: 0, default: 0 },
     mountingCost: { type: Number, min: 0, default: 0 },
     totalCost: { type: Number, min: 0 },
+    // Default image — the one every list, PPT and export shows.
     mediaImage: String,
+    // Every image saved for the site (includes the default). Older sites only have mediaImage.
+    mediaImages: { type: [String], default: undefined },
     // Optional link to a reusable Site Info card (title + description) shown on PPT templates
     // that support it (e.g. Adinn-Direct-Client-format). Only the reference is stored here —
     // the actual title/description text lives on the SiteInfo document, never duplicated here.
@@ -110,8 +142,8 @@ const siteSchema = new mongoose.Schema(
     isActive: { type: Boolean, default: true },
     mediaStatus: {
       type: String,
-      enum: ['available', 'booked', 'blocked'],
-      default: 'available',
+      enum: MEDIA_STATUSES,
+      default: 'immediate',
       index: true,
     },
     // Cached snapshot of the currently-active booking (or undefined). Kept in sync by
@@ -119,6 +151,7 @@ const siteSchema = new mongoose.Schema(
     bookingInfo: bookingInfoSchema,
     bookings: { type: [bookingRecordSchema], default: [] },
     blockInfo: blockInfoSchema,
+    statusInfo: statusInfoSchema,
     assignedTL: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     updatedBy: { type: String, default: 'System' },
@@ -200,11 +233,15 @@ siteSchema.pre('save', function (next) {
     snapshot(this, INVENTORY_FIELDS) !== inventorySnapshot ||
     this.$locals.forceInventoryTouch;
 
-  if (masterChanged) {
+  // A status/booking change made from Site Management ($locals.changeSource = 'sites') is a site
+  // update — it bumps "Site Updated", not "Inventory Updated". From the Inventory page, bulk status
+  // and the automatic date checks it stays an inventory update.
+  const fromSitePage = this.$locals.changeSource === 'sites';
+  if (masterChanged || (inventoryChanged && fromSitePage && !this.isNew)) {
     this.updatedAt = now;
     if (this.$locals.currentUserName) this.updatedBy = this.$locals.currentUserName;
   }
-  if (inventoryChanged) {
+  if (inventoryChanged && (!fromSitePage || this.isNew)) {
     this.inventoryUpdatedAt = now;
     if (this.$locals.currentUserName) this.inventoryUpdatedBy = this.$locals.currentUserName;
   }

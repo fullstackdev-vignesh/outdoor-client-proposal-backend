@@ -1,4 +1,5 @@
 const InventoryHistory = require('../models/InventoryHistory');
+const { normalizeStatus } = require('../config/siteStatus');
 const Client = require('../models/Client');
 
 const IST_OFFSET_MS = 330 * 60000;
@@ -12,8 +13,14 @@ async function recordStatusPeriod({ site, previousStatus, source, userId, effect
   const now = effectiveAt || nowIST();
   const newStatus = site.mediaStatus;
 
-  const effectiveFrom = newStatus === 'booked' && site.bookingInfo?.startDate ? new Date(site.bookingInfo.startDate) : now;
-  const effectiveTo = newStatus === 'booked' && site.bookingInfo?.endDate ? new Date(site.bookingInfo.endDate) : null;
+  // Booked and dated Blocked periods run over their own dates; everything else starts now.
+  const datedBlock = (newStatus === 'blocked' || newStatus === 'confirmed') && site.blockInfo?.startDate && site.blockInfo?.endDate;
+  const effectiveFrom =
+    newStatus === 'booked' && site.bookingInfo?.startDate ? new Date(site.bookingInfo.startDate) :
+    datedBlock ? new Date(site.blockInfo.startDate) : now;
+  const effectiveTo =
+    newStatus === 'booked' && site.bookingInfo?.endDate ? new Date(site.bookingInfo.endDate) :
+    datedBlock ? new Date(site.blockInfo.endDate) : null;
 
   // Close whatever period was previously open for this site (no-op for a brand-new site).
   await InventoryHistory.updateMany({ site: site._id, effectiveTo: null }, { $set: { effectiveTo: effectiveFrom, updatedAt: now } });
@@ -40,14 +47,23 @@ async function recordStatusPeriod({ site, previousStatus, source, userId, effect
   // Every booking (current, upcoming or completed) gets its own Timeline row via
   // syncBookingTimelineRecords, called unconditionally on every save — so a 'booked' row
   // here would just duplicate whichever booking happens to be live right now. Still run the
-  // open-period-closing update above (e.g. closing an 'available' row when a booking starts).
+  // open-period-closing update above (e.g. closing an 'immediate' row when a booking starts).
   if (newStatus === 'booked') return;
 
-  if (newStatus === 'blocked' && site.blockInfo) {
+  if (['hold', 'issue'].includes(newStatus) && site.statusInfo) {
+    doc.statusSnapshot = { reason: site.statusInfo.reason, notes: site.statusInfo.notes, date: site.statusInfo.date };
+  }
+
+  if ((newStatus === 'blocked' || newStatus === 'confirmed') && site.blockInfo) {
     doc.blockSnapshot = {
+      kind: site.blockInfo.kind || 'blocked',
       reason: site.blockInfo.reason,
       notes: site.blockInfo.notes,
       blockedDate: site.blockInfo.blockedDate,
+      customerType: site.blockInfo.customerType,
+      customerName: site.blockInfo.customerName,
+      startDate: site.blockInfo.startDate,
+      endDate: site.blockInfo.endDate,
     };
   }
 
@@ -195,7 +211,7 @@ function buildOverlapFilter(query) {
   if (query.state) filter.state = new RegExp(`^${escapeRegex(query.state.trim())}$`, 'i');
   if (query.city) filter.city = new RegExp(escapeRegex(query.city.trim()), 'i');
   if (query.siteOwner) filter.siteOwner = query.siteOwner;
-  if (query.mediaStatus) filter.status = query.mediaStatus;
+  if (query.mediaStatus) filter.status = normalizeStatus(query.mediaStatus);
   if (query.isActive !== undefined && query.isActive !== '') filter.isActive = query.isActive === 'true';
   if (query.search) {
     filter.$or = [{ mediaId: new RegExp(query.search, 'i') }, { mediaType: new RegExp(query.search, 'i') }, { city: new RegExp(query.search, 'i') }, { state: new RegExp(query.search, 'i') }];

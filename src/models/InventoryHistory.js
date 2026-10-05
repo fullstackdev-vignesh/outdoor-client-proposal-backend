@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { HISTORY_STATUSES } = require('../config/siteStatus');
 
 const IST_OFFSET_MS = 330 * 60000;
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
@@ -22,8 +23,8 @@ const inventoryHistorySchema = new mongoose.Schema({
   mediaImage: String,
   siteOwner: String,
 
-  status: { type: String, enum: ['available', 'booked', 'blocked', 'cancelled'], required: true, index: true },
-  previousStatus: { type: String, enum: ['available', 'booked', 'blocked', null], default: null },
+  status: { type: String, enum: [...HISTORY_STATUSES, 'cancelled'], required: true, index: true },
+  previousStatus: { type: String, enum: [...HISTORY_STATUSES, null], default: null },
   isActive: { type: Boolean, default: true },
 
   // Identifies which booking (Site.bookings[].bookingId) this row represents — lets a site
@@ -57,10 +58,25 @@ const inventoryHistorySchema = new mongoose.Schema({
     monthlyTotalCost: Number,
     amount: Number,
   },
+  // Blocked / Confirmed rows.
   blockSnapshot: {
+    kind: String,
     reason: String,
     notes: String,
     blockedDate: Date,
+    customerType: String,
+    customerName: String,
+    startDate: Date,
+    endDate: Date,
+  },
+  // Hold / Issue rows: the reason at the time (older rows may also hold a "confirmed" client).
+  statusSnapshot: {
+    reason: String,
+    notes: String,
+    customerType: String,
+    client: { type: mongoose.Schema.Types.ObjectId, ref: 'Client' },
+    customerName: String,
+    date: Date,
   },
   // Set only on the row for a booking that was cancelled — keeps `bookingSnapshot`'s original
   // dates intact (still visible as the "Booked Period") alongside why/when/by-whom it ended.

@@ -8,6 +8,7 @@ const {
   createSite,
   updateSite,
   deleteSite,
+  setSiteActive,
   changeStatus,
   cancelBooking,
   bulkChangeStatus,
@@ -45,6 +46,7 @@ router.get('/:id/timeline', getSiteTimeline);
 router.get('/:id', getSite);
 const uploadFields = upload.fields([
   { name: 'mediaImage', maxCount: 1 },
+  { name: 'mediaImages', maxCount: 20 },
   { name: 'image', maxCount: 1 },
   { name: 'file', maxCount: 1 },
 ]);
@@ -57,6 +59,7 @@ router.put('/:id', authorize('admin', 'tl', 'user', 'bd'), uploadFields, updateS
 router.patch('/:id/status', authorize('admin', 'tl', 'user', 'bd'), changeStatus);
 router.patch('/:id/bookings/:bookingId/cancel', authorize('admin', 'tl', 'user', 'bd'), cancelBooking);
 // Deleting a site is admin-only — TL, BD and User roles cannot delete.
+router.patch('/:id/active', authorize('admin', 'tl', 'user', 'bd'), setSiteActive);
 router.delete('/:id', authorize('admin'), deleteSite);
 
 module.exports = router;

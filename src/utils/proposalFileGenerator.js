@@ -7,6 +7,7 @@ const { getRouteMapBuffer } = require('./mapService');
 const { uploadFileToCloud } = require('./storageService');
 const PPTTemplate = require('../models/PPTTemplate');
 const ExcelTemplate = require('../models/ExcelTemplate');
+const { illuminationLabel } = require('./illuminationLabel');
 
 const BACKEND_ROOT = path.join(__dirname, '..', '..');
 
@@ -1002,7 +1003,7 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
             ['Tamil Nadu', site.state || '-'],
             ['Chennai', site.city || '-'],
             ['Hoarding', site.mediaType || '-'],
-            ['Not Lit', site.illumination || '-'],
+            ['Non Lit', site.illumination || '-'],
             ['35.00', widthText],
             ['25.00', heightText],
           ],
@@ -1217,7 +1218,7 @@ function buildExcelRow(site, index) {
     qty: site.quantity || 1,
     width: site.width || 0,
     height: site.height || 0,
-    type: site.illumination || '',
+    type: illuminationLabel(site.illumination) || '',
     durationDays: site.bookingInfo?.durationDays || '',
     displayCostPerMonth: site.monthlyAmount || 0,
     printingCost: site.printingCost || 0,

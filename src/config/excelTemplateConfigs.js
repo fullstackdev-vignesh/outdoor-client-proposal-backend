@@ -127,6 +127,10 @@ const ROTN_EXCEL_1 = {
   selfReferencingFormulas: [
     { column: 'N', build: (r, cols) => `${cols.width}${r}*${cols.height}${r}` },
     { column: 'Q', build: (r, cols) => `${cols.displayCostPerMonth}${r}/30*${cols.durationDays}${r}` },
+    // Total Cost = Display Duration Cost (Q) + Printing + Mounting. The real file's own formula still
+    // names its pre-insertion letters, so — like Adinn's — it's rewritten unconditionally; when the
+    // client has Agency Comm/GST, applyAdinnDynamicColumns rewrites it again to include them.
+    { column: 'T', build: (r, cols) => `Q${r}+${cols.printingCost}${r}+${cols.mountingCost}${r}` },
   ],
   totalColumns: ['M', 'N', 'P', 'Q', 'R', 'S', 'T'],
   // The real uploaded ROTN file has NO Agency Comm/GST columns at all — unlike Adinn (whose
