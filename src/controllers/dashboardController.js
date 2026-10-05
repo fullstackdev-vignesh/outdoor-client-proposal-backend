@@ -148,6 +148,9 @@ const getDashboardStats = asyncHandler(async (req, res) => {
   ]);
   const totalSiteBookingsCount = siteBookingsCountAgg[0]?.count || 0;
   const legacyBookingsCount = await Booking.countDocuments();
+  const [confirmedMedia, holdMedia, issueMedia] = await Promise.all(
+    ['confirmed', 'hold', 'issue'].map((mediaStatus) => Site.countDocuments({ mediaStatus }))
+  );
   const totalBookings = totalSiteBookingsCount + legacyBookingsCount;
 
   res.json({
@@ -161,6 +164,9 @@ const getDashboardStats = asyncHandler(async (req, res) => {
       availableMedia,
       bookedMedia,
       blockedMedia,
+      confirmedMedia,
+      holdMedia,
+      issueMedia,
       totalClients,
       totalProposals,
       totalBookings,
@@ -169,9 +175,9 @@ const getDashboardStats = asyncHandler(async (req, res) => {
       immediate: availableMedia,
       booked: bookedMedia,
       blocked: blockedMedia,
-      confirmed: await Site.countDocuments({ mediaStatus: 'confirmed' }),
-      hold: await Site.countDocuments({ mediaStatus: 'hold' }),
-      issue: await Site.countDocuments({ mediaStatus: 'issue' }),
+      confirmed: confirmedMedia,
+      hold: holdMedia,
+      issue: issueMedia,
     },
     recent: { sites: recentSites, clients: recentClients, bookings: recentBookings, proposals: recentProposals, users: recentUsers },
   });
