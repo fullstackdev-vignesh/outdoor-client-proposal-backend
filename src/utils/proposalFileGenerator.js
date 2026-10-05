@@ -1204,6 +1204,44 @@ async function generateProposalPpt(proposal, { locationMode = 'with' } = {}) {
   return pptUrl;
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+const utcDay = (value) => {
+  const d = new Date(value);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+};
+const ddmmyyyy = (ms) => {
+  const d = new Date(ms);
+  return `${String(d.getUTCDate()).padStart(2, '0')}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${d.getUTCFullYear()}`;
+};
+
+// "Site Status" as a client reads it: "Immediate" when free now, otherwise the date the site is
+// free again — the day after the running Blocked/Confirmed period or booking ends (following on
+// through any booking that starts right after it). Hold / Issue have no end date: "-".
+function siteAvailabilityLabel(site) {
+  const status = site.mediaStatus;
+  if (!status || status === 'immediate' || status === 'available') return 'Immediate';
+  if (status === 'hold' || status === 'issue') return '-';
+
+  let endsOn = null;
+  if ((status === 'blocked' || status === 'confirmed') && site.blockInfo?.endDate) endsOn = utcDay(site.blockInfo.endDate);
+  if (status === 'booked') {
+    const active = (site.bookings || []).find((b) => b.status === 'active') || site.bookingInfo;
+    if (active?.endDate) endsOn = utcDay(active.endDate);
+  }
+  if (endsOn === null) return '-'; // e.g. an older block saved without dates
+
+  // A booking starting the very next day keeps the site taken — free only after the last of them.
+  const later = (site.bookings || [])
+    .filter((b) => b.status !== 'cancelled' && b.startDate && b.endDate)
+    .map((b) => ({ start: utcDay(b.startDate), end: utcDay(b.endDate) }))
+    .sort((a, b) => a.start - b.start);
+  let freeOn = endsOn + DAY_MS;
+  for (const b of later) {
+    if (b.start <= freeOn && b.end >= freeOn) freeOn = b.end + DAY_MS;
+  }
+  return ddmmyyyy(freeOn);
+}
+
 // Generic field shape every Excel format's `columns` config reads from — add a new field here
 // first if a new Site field needs to appear in some format, then reference it by name in that
 // format's config entry.
@@ -1218,12 +1256,17 @@ function buildExcelRow(site, index) {
     qty: site.quantity || 1,
     width: site.width || 0,
     height: site.height || 0,
+    // The site's own Specification (e.g. "20x20"); falls back to its size when none was saved.
+    specification: site.specification || (site.width && site.height ? `${site.width}x${site.height}` : ''),
     type: illuminationLabel(site.illumination) || '',
     durationDays: site.bookingInfo?.durationDays || '',
     displayCostPerMonth: site.monthlyAmount || 0,
     printingCost: site.printingCost || 0,
     mountingCost: site.mountingCost || 0,
     siteStatus: site.mediaStatus ? site.mediaStatus.charAt(0).toUpperCase() + site.mediaStatus.slice(1) : '',
+    // "Immediate" or the date the site is free again (see siteAvailabilityLabel).
+    siteAvailability: siteAvailabilityLabel(site),
+    mediaVendor: site.siteOwner || '',
     // Blank (never 0) when a site has no coordinates set, so fillRowPerSite's skip-if-empty
     // rule leaves the cell's placeholder blank instead of writing a misleading "0".
     latitude: site.latitude != null ? site.latitude : '',

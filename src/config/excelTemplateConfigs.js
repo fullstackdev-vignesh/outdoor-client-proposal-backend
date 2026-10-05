@@ -27,25 +27,36 @@ const ADINN_EXCEL_1 = {
   // shifted things). Every letter below is the FINAL position once all three insertions have
   // happened — i.e. what the original template's own D onward (Location..Site Status) and
   // O/P (Vendor Name/Cost) become after being pushed right by them.
+  // Specification (right after Size W/H) is inserted the same way — every letter from K on below
+  // is one further right because of it.
   fixedExtraColumns: [
     { before: 'D', headerText: 'Media Type' },
     { before: 'F', headerText: 'Latitude', decimalValue: true },
     { before: 'G', headerText: 'Longitude', decimalValue: true },
+    { before: 'K', headerText: 'Specification' },
   ],
+  // Site Status shows "Immediate" or the date the site is free again; the template's own Vendor Name
+  // column (S) is kept as "Media Vendor" with the site owner. Latitude/Longitude are moved to the
+  // very end afterwards (moveLatLngToEnd in excelTemplateEngine.js).
   columns: {
     siNo: 'A', city: 'B', media: 'C', mediaType: 'D', location: 'E', latitude: 'F', longitude: 'G',
-    qty: 'H', width: 'I', height: 'J', type: 'K', displayCostPerMonth: 'M', printingCost: 'N',
-    mountingCost: 'O', siteStatus: 'Q',
+    qty: 'H', width: 'I', height: 'J', specification: 'K', type: 'L', displayCostPerMonth: 'N', printingCost: 'O',
+    mountingCost: 'P', siteAvailability: 'R', mediaVendor: 'S',
   },
   // Column C's header text in the uploaded master says "Media" — shown as "Media Code" instead
   // (mediaId data itself is unchanged), so it reads clearly next to the new Media Type column.
-  headerRenames: [{ cell: 'C1', text: 'Media Code' }],
+  headerRenames: [
+    { cell: 'C1', text: 'Media Code' },
+    { cell: 'S1', text: 'Media Vendor' },
+  ],
   columnWidths: [
     { col: 'D', width: 14 },
     { col: 'F', width: 11 },
     { col: 'G', width: 11 },
+    { col: 'K', width: 14 },
+    { col: 'R', width: 13 },
   ],
-  // Area (L) and Total Cost (P) are both formulas in the ORIGINAL master file that
+  // Area (M) and Total Cost (Q) are both formulas in the ORIGINAL master file that
   // insertColumnBefore can't fix on its own — it moves the cell holding a formula, but never
   // rewrites the formula's own text, which still names the pre-shift column letters. Rewritten
   // here with the final post-insertion letters (see applyFixedExtraColumns's caller).
@@ -53,17 +64,17 @@ const ADINN_EXCEL_1 = {
   // in which case applyAdinnDynamicColumns never runs and would otherwise leave this stale) —
   // when fees ARE present, applyAdinnDynamicColumns's own rewrite simply overwrites this again.
   selfReferencingFormulas: [
-    { column: 'L', build: (r, cols) => `${cols.qty}${r}*${cols.width}${r}*${cols.height}${r}` },
-    { column: 'P', build: (r, cols) => `${cols.displayCostPerMonth}${r}+${cols.printingCost}${r}+${cols.mountingCost}${r}` },
+    { column: 'M', build: (r, cols) => `${cols.qty}${r}*${cols.width}${r}*${cols.height}${r}` },
+    { column: 'Q', build: (r, cols) => `${cols.displayCostPerMonth}${r}+${cols.printingCost}${r}+${cols.mountingCost}${r}` },
   ],
-  totalColumns: ['H', 'L', 'M', 'N', 'O', 'P'],
-  // Vendor Name/Vendor Cost are unused — dropped from the sheet entirely (not just left
-  // blank). Agency Comm / GST are inserted right before Total Cost, in that order, ONLY when
-  // the client has that percentage set — see applyAdinnDynamicColumns in excelTemplateEngine.js.
-  removeColumns: ['R', 'S'],
-  feeColumnsBeforeAnchor: 'P',
-  feeRangeStartCol: 'M',
-  feeRangeBaseEndCol: 'O',
+  totalColumns: ['H', 'M', 'N', 'O', 'P', 'Q'],
+  // Vendor Cost is unused — dropped from the sheet entirely (Vendor Name is kept as Media Vendor).
+  // Agency Comm / GST are inserted right before Total Cost, in that order, ONLY when the client
+  // has that percentage set — see applyAdinnDynamicColumns in excelTemplateEngine.js.
+  removeColumns: ['T'],
+  feeColumnsBeforeAnchor: 'Q',
+  feeRangeStartCol: 'N',
+  feeRangeBaseEndCol: 'P',
   // Area/Display/Printing/Mounting (style 11) and Total Cost (style 14) ship in "General"
   // format (plain "250000", no grouping) — reformatted to Indian comma grouping
   // ("2,50,000"). 22/23 are the same columns' styles in the moved Total row (the border-row
@@ -97,10 +108,14 @@ const ROTN_EXCEL_1 = {
   // actual sheet XML) — unlike Adinn/Jagran, which both merge a header cell down into row2.
   fixedExtraColumnHeaderRow: 1,
   fixedExtraColumnBlankHeaderRow: null,
+  // Availability ("Immediate" or the date the site is free again) goes right after Total Cost, before
+  // Slot Loop — inserted last, so no letter before it changes. Agency Comm/GST (when the client has
+  // them) are inserted before Total Cost later and simply push it right along with everything else.
   fixedExtraColumns: [
     { before: 'E', headerText: 'Media Type' },
     { before: 'G', headerText: 'Latitude', decimalValue: true },
     { before: 'H', headerText: 'Longitude', decimalValue: true },
+    { before: 'U', headerText: 'Availability' },
   ],
   // The uploaded file's own header cell literally says "Media" — shown as "Media Code" instead
   // (mediaId data itself is unchanged), so it reads clearly next to the new Media Type column.
@@ -109,11 +124,12 @@ const ROTN_EXCEL_1 = {
     { col: 'E', width: 14 },
     { col: 'G', width: 11 },
     { col: 'H', width: 11 },
+    { col: 'U', width: 13 },
   ],
   columns: {
     siNo: 'A', state: 'B', city: 'C', media: 'D', mediaType: 'E', location: 'F', latitude: 'G', longitude: 'H',
     type: 'I', width: 'J', height: 'K', qty: 'M', durationDays: 'O', displayCostPerMonth: 'P',
-    printingCost: 'R', mountingCost: 'S',
+    printingCost: 'R', mountingCost: 'S', siteAvailability: 'U',
   },
   // No Site field maps to the block's 2nd row (a secondary W/H pair) — rather than leave it
   // visible with a meaningless "0  0", it's deleted outright (collapseSecondaryRows in
@@ -247,7 +263,8 @@ const JAGRAN_EXCEL_2 = {
   // excelTemplateEngine.js rather than left showing the master file's own unrelated leftover
   // example text for that row. Latitude/Longitude now sit right after Location (same as format
   // 1 — see JAGRAN_COLUMNS), so no override is needed for them here any more.
-  columns: { ...JAGRAN_COLUMNS, siteStatus: 'W', rationale: 'X' },
+  // Availability shows "Immediate" or the date the site is free again ("-" for Hold / Issue).
+  columns: { ...JAGRAN_COLUMNS, siteAvailability: 'W', rationale: 'X' },
 };
 
 const EXCEL_CONFIGS = {
