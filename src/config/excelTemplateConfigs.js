@@ -115,7 +115,9 @@ const ROTN_EXCEL_1 = {
     { before: 'E', headerText: 'Media Type' },
     { before: 'G', headerText: 'Latitude', decimalValue: true },
     { before: 'H', headerText: 'Longitude', decimalValue: true },
-    { before: 'U', headerText: 'Availability' },
+    // Specification right after Size W/H — every letter from L on below is one further right for it.
+    { before: 'L', headerText: 'Specification' },
+    { before: 'V', headerText: 'Availability' },
   ],
   // The uploaded file's own header cell literally says "Media" — shown as "Media Code" instead
   // (mediaId data itself is unchanged), so it reads clearly next to the new Media Type column.
@@ -124,12 +126,13 @@ const ROTN_EXCEL_1 = {
     { col: 'E', width: 14 },
     { col: 'G', width: 11 },
     { col: 'H', width: 11 },
-    { col: 'U', width: 13 },
+    { col: 'L', width: 14 },
+    { col: 'V', width: 13 },
   ],
   columns: {
     siNo: 'A', state: 'B', city: 'C', media: 'D', mediaType: 'E', location: 'F', latitude: 'G', longitude: 'H',
-    type: 'I', width: 'J', height: 'K', qty: 'M', durationDays: 'O', displayCostPerMonth: 'P',
-    printingCost: 'R', mountingCost: 'S', siteAvailability: 'U',
+    type: 'I', width: 'J', height: 'K', specification: 'L', qty: 'N', durationDays: 'P', displayCostPerMonth: 'Q',
+    printingCost: 'S', mountingCost: 'T', siteAvailability: 'V',
   },
   // No Site field maps to the block's 2nd row (a secondary W/H pair) — rather than leave it
   // visible with a meaningless "0  0", it's deleted outright (collapseSecondaryRows in
@@ -141,14 +144,14 @@ const ROTN_EXCEL_1 = {
   secondaryRowColumns: ['J', 'K'],
   collapseSecondaryRow: true,
   selfReferencingFormulas: [
-    { column: 'N', build: (r, cols) => `${cols.width}${r}*${cols.height}${r}` },
-    { column: 'Q', build: (r, cols) => `${cols.displayCostPerMonth}${r}/30*${cols.durationDays}${r}` },
-    // Total Cost = Display Duration Cost (Q) + Printing + Mounting. The real file's own formula still
+    { column: 'O', build: (r, cols) => `${cols.width}${r}*${cols.height}${r}` },
+    { column: 'R', build: (r, cols) => `${cols.displayCostPerMonth}${r}/30*${cols.durationDays}${r}` },
+    // Total Cost = Display Duration Cost (R) + Printing + Mounting. The real file's own formula still
     // names its pre-insertion letters, so — like Adinn's — it's rewritten unconditionally; when the
     // client has Agency Comm/GST, applyAdinnDynamicColumns rewrites it again to include them.
-    { column: 'T', build: (r, cols) => `Q${r}+${cols.printingCost}${r}+${cols.mountingCost}${r}` },
+    { column: 'U', build: (r, cols) => `R${r}+${cols.printingCost}${r}+${cols.mountingCost}${r}` },
   ],
-  totalColumns: ['M', 'N', 'P', 'Q', 'R', 'S', 'T'],
+  totalColumns: ['N', 'O', 'Q', 'R', 'S', 'T', 'U'],
   // The real uploaded ROTN file has NO Agency Comm/GST columns at all — unlike Adinn (whose
   // Vendor columns get replaced) or Jagran (whose fee columns already exist, fixed-percentage),
   // ROTN's Total Cost (T, shifted from Q) is simply Display Duration Cost + Printing + Mounting
@@ -157,9 +160,11 @@ const ROTN_EXCEL_1 = {
   // feeRangeStartCol/feeRangeBaseEndCol describe ROTN's own (now-shifted) base cost range
   // (Q:S, not Adinn's M:O), and feeStyleIds reuse ROTN's own neighboring header/data/total-row
   // style ids so inserted cells match this file's look instead of Adinn's.
-  feeColumnsBeforeAnchor: 'T',
-  feeRangeStartCol: 'Q',
-  feeRangeBaseEndCol: 'S',
+  // Slot Loop (W, right after Availability) is unused — dropped from the sheet entirely.
+  removeColumns: ['W'],
+  feeColumnsBeforeAnchor: 'U',
+  feeRangeStartCol: 'R',
+  feeRangeBaseEndCol: 'T',
   feeStyleIds: { header: 11, data: 25, total: 17 },
 };
 
@@ -179,10 +184,10 @@ const ROTN_EXCEL_1 = {
 // not before Media itself).
 const JAGRAN_COLUMNS = {
   siNo: 'A', state: 'B', city: 'C', media: 'D', mediaType: 'E', location: 'F', latitude: 'G', longitude: 'H',
-  width: 'I', height: 'J', qty: 'K', type: 'N', displayCostPerMonth: 'O', durationDays: 'P', mountingCost: 'R',
-  printingCost: 'S',
+  width: 'I', height: 'J', specification: 'K', qty: 'L', type: 'O', displayCostPerMonth: 'P', durationDays: 'Q',
+  mountingCost: 'S', printingCost: 'T',
 };
-const JAGRAN_TOTAL_COLUMNS = ['K', 'L', 'O', 'Q', 'R', 'S', 'T', 'U', 'V'];
+const JAGRAN_TOTAL_COLUMNS = ['L', 'M', 'P', 'R', 'S', 'T', 'U', 'V', 'W'];
 // Sq. ft (L) and Cost as per Duration (Q) are both formulas in the ORIGINAL real files
 // (confirmed by inspecting them directly: `=F5*G5*H5` and `=L5/30*M5`, using the file's OWN
 // pre-insertion letters) that insertColumnBefore can't fix on its own — it moves the cell
@@ -192,8 +197,8 @@ const JAGRAN_TOTAL_COLUMNS = ['K', 'L', 'O', 'Q', 'R', 'S', 'T', 'U', 'V'];
 // unconditionally overwritten with the site's real cost value by fillRowPerSite anyway, so
 // their stale formula text is harmless and left alone.
 const JAGRAN_SELF_REFERENCING_FORMULAS = [
-  { column: 'L', build: (r, cols) => `${cols.width}${r}*${cols.height}${r}*${cols.qty}${r}` },
-  { column: 'Q', build: (r, cols) => `${cols.displayCostPerMonth}${r}/30*${cols.durationDays}${r}` },
+  { column: 'M', build: (r, cols) => `${cols.width}${r}*${cols.height}${r}*${cols.qty}${r}` },
+  { column: 'R', build: (r, cols) => `${cols.displayCostPerMonth}${r}/30*${cols.durationDays}${r}` },
 ];
 
 const JAGRAN_EXCEL_1 = {
@@ -221,6 +226,8 @@ const JAGRAN_EXCEL_1 = {
     { before: 'E', headerText: 'Media Type' },
     { before: 'G', headerText: 'Latitude', decimalValue: true },
     { before: 'H', headerText: 'Longitude', decimalValue: true },
+    // Specification right after Sizes W/H — every letter from K on above is one further right for it.
+    { before: 'K', headerText: 'Specification' },
   ],
   // "Sq. ft" (L, shifted from I) ships narrow (~7.3) and needs widening for its own per-row
   // value. "Display Cost per month" (O, shifted from L, ~18.4) and "Cost as per Duration" (Q,
@@ -233,9 +240,10 @@ const JAGRAN_EXCEL_1 = {
     { col: 'E', width: 14 },
     { col: 'G', width: 11 },
     { col: 'H', width: 11 },
-    { col: 'L', width: 12 },
-    { col: 'O', width: 22 },
-    { col: 'Q', width: 20 },
+    { col: 'K', width: 13 },
+    { col: 'M', width: 12 },
+    { col: 'P', width: 22 },
+    { col: 'R', width: 20 },
   ],
   // Unlike Adinn/ROTN, the real uploaded file already has these two fee columns natively baked
   // in (T: "Agency comm. @ 2%", U: "GST @ 18%", V: "Total (Incl. All)") — always shown, always
@@ -245,11 +253,11 @@ const JAGRAN_EXCEL_1 = {
   // matching Adinn's own conditional rule, via applyConditionalFeeColumns in
   // excelTemplateEngine.js. Order matters: Agency Comm before GST, same as the file's own layout.
   conditionalFeeColumns: [
-    { key: 'agencyComm', col: 'T', label: 'Agency comm.' },
-    { key: 'gst', col: 'U', label: 'GST' },
+    { key: 'agencyComm', col: 'U', label: 'Agency comm.' },
+    { key: 'gst', col: 'V', label: 'GST' },
   ],
-  conditionalFeeBaseColumns: ['Q', 'R', 'S'],
-  conditionalFeeTotalCol: 'V',
+  conditionalFeeBaseColumns: ['R', 'S', 'T'],
+  conditionalFeeTotalCol: 'W',
 };
 
 const JAGRAN_EXCEL_2 = {
@@ -264,7 +272,7 @@ const JAGRAN_EXCEL_2 = {
   // example text for that row. Latitude/Longitude now sit right after Location (same as format
   // 1 — see JAGRAN_COLUMNS), so no override is needed for them here any more.
   // Availability shows "Immediate" or the date the site is free again ("-" for Hold / Issue).
-  columns: { ...JAGRAN_COLUMNS, siteAvailability: 'W', rationale: 'X' },
+  columns: { ...JAGRAN_COLUMNS, siteAvailability: 'X', rationale: 'Y' },
 };
 
 const EXCEL_CONFIGS = {
