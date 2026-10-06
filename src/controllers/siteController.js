@@ -21,7 +21,7 @@ const TRACKED_FIELDS = [
   'latitude', 'longitude', 'illumination', 'width', 'height', 'sizeUnit', 'amount', 'gstAmount',
   'monthlyAmount', 'printingCost', 'mountingCost', 'totalCost', 'mediaImage', 'isActive', 'mediaStatus',
   'blockInfo.reason', 'blockInfo.notes', 'blockInfo.customerName', 'blockInfo.startDate', 'blockInfo.endDate',
-  'statusInfo.reason', 'statusInfo.notes',
+  'statusInfo.reason', 'statusInfo.notes', 'inactiveReason',
 ];
 
 function getPath(obj, path) {
@@ -152,6 +152,19 @@ function blockOverlapMessage(block, startDate, endDate) {
   const clash = new Date(startDate) <= new Date(block.endDate) && new Date(endDate) >= new Date(block.startDate);
   const what = block.kind === 'confirmed' ? 'confirmed' : 'blocked';
   return clash ? `This site is ${what} from ${formatDateLabel(block.startDate)} to ${formatDateLabel(block.endDate)}.` : null;
+}
+
+// Making a site Inactive needs a reason (kept on the site and shown against it); making it Active
+// again clears it. Returns an error message, or null. `wasActive` is the site's state before the save.
+function applyInactiveReason(target, reason, wasActive) {
+  if (target.isActive === false) {
+    const text = String(reason ?? target.inactiveReason ?? '').trim();
+    if (!text && wasActive) return 'Reason is required to make a site Inactive';
+    if (text) target.inactiveReason = text;
+  } else {
+    target.inactiveReason = undefined;
+  }
+  return null;
 }
 
 // Puts a site (or a new site's payload) into a manual status — Blocked, Confirmed, Hold or Issue —
@@ -634,8 +647,13 @@ const createSite = asyncHandler(async (req, res) => {
 
   Site.applyComputedFields(payload);
 
-  // A site added as Inactive is always Immediate (no block/booking/hold details apply).
+  // A site added as Inactive is always Immediate (no block/booking/hold details apply) and needs a reason.
   if (payload.isActive === false) payload.mediaStatus = 'immediate';
+  const inactiveError = applyInactiveReason(payload, payload.inactiveReason, true);
+  if (inactiveError) {
+    res.status(400);
+    throw new Error(inactiveError);
+  }
 
   if (MANUAL_STATUSES.includes(payload.mediaStatus)) {
     const statusError = await applyManualStatus(payload, payload.mediaStatus, statusInput, req.user);
@@ -704,6 +722,11 @@ const updateSite = asyncHandler(async (req, res) => {
   site.$locals.changeSource = 'sites';
   Object.assign(site, siteFields);
   Site.applyComputedFields(site);
+  const inactiveError = applyInactiveReason(site, payload.inactiveReason, before.isActive !== false);
+  if (inactiveError) {
+    res.status(400);
+    throw new Error(inactiveError);
+  }
 
   if (site.isActive === false) {
     // Inactive: status goes to Immediate — any Blocked/Confirmed period or Hold/Issue reason is
@@ -793,6 +816,11 @@ const setSiteActive = asyncHandler(async (req, res) => {
   }
   const before = site.toObject();
   site.isActive = req.body.isActive;
+  const inactiveError = applyInactiveReason(site, req.body.reason, before.isActive !== false);
+  if (inactiveError) {
+    res.status(400);
+    throw new Error(inactiveError);
+  }
   // Inactive -> Immediate right away (block/confirm/hold/issue dropped, bookings kept);
   // Active again -> status recomputed from its bookings.
   resolveSiteStatus(site);

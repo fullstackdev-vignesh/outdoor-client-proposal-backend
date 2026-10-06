@@ -94,7 +94,7 @@ const MASTER_FIELDS = [
   'sizeUnit', 'autoSize', 'amount', 'gstAmount', 'monthlyAmount', 'printingCost', 'mountingCost',
   'totalCost', 'mediaImage', 'mediaImages', 'siteInfoId',
   // Active/Inactive is the site's own setting (changed in Site Management), not inventory state.
-  'isActive',
+  'isActive', 'inactiveReason',
 ];
 
 // Fields that represent live Inventory/status/booking state — changing any of these bumps
@@ -140,6 +140,8 @@ const siteSchema = new mongoose.Schema(
     // the actual title/description text lives on the SiteInfo document, never duplicated here.
     siteInfoId: { type: mongoose.Schema.Types.ObjectId, ref: 'SiteInfo', default: null },
     isActive: { type: Boolean, default: true },
+    // Why the site was made Inactive (required then); cleared when it's made Active again.
+    inactiveReason: { type: String, trim: true },
     mediaStatus: {
       type: String,
       enum: MEDIA_STATUSES,
