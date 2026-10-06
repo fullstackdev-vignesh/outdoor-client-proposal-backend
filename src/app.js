@@ -12,6 +12,7 @@ const proposalRoutes = require('./routes/proposalRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');
 const locationRoutes = require('./routes/locationRoutes');
 const siteInfoRoutes = require('./routes/siteInfoRoutes');
+const mediaRateRoutes = require('./routes/mediaRateRoutes');
 const { pptRouter, excelRouter } = require('./routes/templateRoutes');
 
 const app = express();
@@ -63,6 +64,7 @@ app.use('/api/proposals', proposalRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/locations', locationRoutes);
 app.use('/api/site-info', siteInfoRoutes);
+app.use('/api/media-rates', mediaRateRoutes);
 app.use('/api/ppt-templates', pptRouter);
 app.use('/api/excel-templates', excelRouter);
 
