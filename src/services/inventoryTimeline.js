@@ -9,7 +9,7 @@ const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 // /inventory row + bulk updates so every source produces identical timeline behaviour.
 // `effectiveAt` backdates a non-booked change to when it really happened (the scheduler passes 12:01 AM
 // after an expired booking's end date); omitted, the change is stamped now.
-async function recordStatusPeriod({ site, previousStatus, source, userId, effectiveAt }) {
+async function recordStatusPeriod({ site, previousStatus, source, userId, effectiveAt, reason }) {
   const now = effectiveAt || nowIST();
   const newStatus = site.mediaStatus;
 
@@ -53,6 +53,8 @@ async function recordStatusPeriod({ site, previousStatus, source, userId, effect
   if (['hold', 'issue'].includes(newStatus) && site.statusInfo) {
     doc.statusSnapshot = { reason: site.statusInfo.reason, notes: site.statusInfo.notes, date: site.statusInfo.date };
   }
+  // Optional reason given when a site was changed to Immediate by hand.
+  if (newStatus === 'immediate' && reason) doc.statusSnapshot = { reason };
 
   if ((newStatus === 'blocked' || newStatus === 'confirmed') && site.blockInfo) {
     doc.blockSnapshot = {

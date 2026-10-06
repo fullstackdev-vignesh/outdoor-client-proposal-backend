@@ -856,6 +856,9 @@ const changeStatus = asyncHandler(async (req, res) => {
     // new booking details entered now (no overlap with the interrupted booking).
     cancelledBookings = unblockSite(site, { wasBlocked: DATED_STATUSES.includes(beforeStatus), user: req.user });
     site.statusInfo = undefined;
+    // Leaving Hold / Issue: resolveSiteStatus leaves a site that is still marked Hold/Issue untouched,
+    // so take the requested status first — it's then recomputed from the bookings/block dates.
+    site.mediaStatus = mediaStatus;
     // "Immediate" can also drop a block that is scheduled ahead (the popup asks first).
     if (mediaStatus === 'immediate' && req.body.removeBlock) site.blockInfo = undefined;
     if (mediaStatus === 'booked') {
@@ -898,7 +901,9 @@ const changeStatus = asyncHandler(async (req, res) => {
   if (statusChanged) {
     // `source` still labels the Timeline entry "via Sites"/"via Inventory" — it no longer
     // decides which timestamp bumps (that's fully data-driven in the Site model now).
-    await recordStatusPeriod({ site, previousStatus: beforeStatus, source: resolvedSource, userId: req.user._id });
+    // An optional reason typed when changing to Immediate is kept on that Timeline entry.
+    const changeReason = String(req.body.changeReason || '').trim();
+    await recordStatusPeriod({ site, previousStatus: beforeStatus, source: resolvedSource, userId: req.user._id, reason: changeReason || undefined });
   }
   await syncBookingTimelineRecords(site, req.user._id, resolvedSource);
   const changedAt = nowIST();
@@ -1007,6 +1012,8 @@ const bulkChangeStatus = asyncHandler(async (req, res) => {
       // the site got blocked (nothing is saved if the new booking below is skipped).
       cancelledBookings = unblockSite(site, { wasBlocked: DATED_STATUSES.includes(beforeStatus), user: req.user });
       site.statusInfo = undefined;
+      // Leaving Hold / Issue (see changeStatus): take the requested status before it's recomputed.
+      site.mediaStatus = mediaStatus;
       if (mediaStatus === 'booked') {
         try {
           // Bulk has no per-site booking to edit — always add a separate new booking.
@@ -1352,6 +1359,7 @@ const exportSites = asyncHandler(async (req, res) => {
     ['Generated On', formatIST(now)],
     ['State Filter', req.query.state || 'All'],
     ['City Filter', req.query.city || 'All'],
+    ['Media Type Filter', req.query.mediaType || 'All'],
     ['Illumination Filter', req.query.illumination || 'All'],
     ['Site Owner Filter', [].concat(req.query.siteOwner || []).filter(Boolean).join(', ') || 'All'],
     ['Media Status Filter', req.query.mediaStatus || 'All'],

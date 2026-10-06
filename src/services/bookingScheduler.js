@@ -93,9 +93,9 @@ function resolveSiteStatus(site, asOf = nowIST()) {
   let blockActive = false;
   if (isDatedBlock(block)) {
     if (today > toUtcMidnight(block.endDate)) site.blockInfo = undefined; // block finished
-    // A Blocked period starts on its Start Date. A Confirmed one shows straight away (from when it's
-    // saved) through its End Date — except while a booking is running, which stays Booked until it ends.
-    else blockActive = block.kind === 'confirmed' ? !active : today >= toUtcMidnight(block.startDate);
+    // Blocked and Confirmed both show straight away (from when they're saved) through their End Date —
+    // except while a booking is running, which stays Booked until it ends.
+    else blockActive = !active;
   }
 
   // Inactive: bookings never make the site Booked.
