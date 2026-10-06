@@ -123,7 +123,7 @@ const siteSchema = new mongoose.Schema(
     illumination: { type: String, trim: true },
     width: { type: Number, min: 0 },
     height: { type: Number, min: 0 },
-    sizeUnit: { type: String, default: 'ft' },
+    sizeUnit: { type: String, default: 'Sq.ft' },
     autoSize: { type: Number, min: 0 },
     amount: { type: Number, min: 0 },
     gstAmount: { type: Number, min: 0 },
