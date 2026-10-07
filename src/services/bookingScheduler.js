@@ -56,10 +56,12 @@ const isDatedBlock = (block) => !!(block && block.startDate && block.endDate);
 function resolveSiteStatus(site, asOf = nowIST()) {
   if (site.isActive === false) {
     site.blockInfo = undefined;
+    if (site.upcomingBlocks?.length) site.upcomingBlocks = [];
     site.statusInfo = undefined;
     site.mediaStatus = 'immediate'; // fall through: bookings' own lifecycle still updates below
   }
   if (OVERRIDE_STATUSES.includes(site.mediaStatus)) return { activeBooking: null };
+  const promotedBlock = promoteUpcomingBlock(site, toUtcMidnight(asOf));
   const block = site.blockInfo;
   if (site.mediaStatus === 'blocked' && block && !isDatedBlock(block)) return { activeBooking: null };
 
@@ -118,7 +120,47 @@ function resolveSiteStatus(site, asOf = nowIST()) {
   }
   site.mediaStatus = blockActive ? block.kind || 'blocked' : active ? 'booked' : 'immediate';
 
-  return { activeBooking: blockActive ? null : active };
+  return { activeBooking: blockActive ? null : active, promotedBlock };
+}
+
+/**
+ * Further Blocked/Confirmed periods (site.upcomingBlocks, added with "+ Add Blocked/Confirmed") wait
+ * until their Start Date. Once the site's own block (blockInfo) is gone or finished and the earliest
+ * waiting period has started, it becomes the site's blockInfo — the rest of resolveSiteStatus then
+ * treats it exactly like any other block. Waiting periods that already ended are dropped.
+ * Returns the period moved into blockInfo, or null.
+ */
+function promoteUpcomingBlock(site, today) {
+  const queue = site.upcomingBlocks || [];
+  if (!queue.length) return null;
+  const remaining = queue
+    .filter((q) => toUtcMidnight(q.endDate) >= today)
+    .sort((a, b) => toUtcMidnight(a.startDate) - toUtcMidnight(b.startDate));
+
+  let promoted = null;
+  const current = site.blockInfo;
+  const currentFree = !current || (isDatedBlock(current) && today > toUtcMidnight(current.endDate));
+  if (currentFree && remaining.length && toUtcMidnight(remaining[0].startDate) <= today) {
+    const next = remaining.shift();
+    site.blockInfo = {
+      kind: next.kind || 'blocked',
+      reason: next.reason,
+      notes: next.notes,
+      customerType: next.customerType,
+      client: next.client,
+      customerName: next.customerName,
+      startDate: next.startDate,
+      endDate: next.endDate,
+      blockedDate: next.blockedDate,
+      blockedBy: next.blockedBy,
+    };
+    promoted = site.blockInfo;
+  }
+  if (remaining.length !== queue.length) {
+    site.upcomingBlocks = remaining;
+    if (typeof site.markModified === 'function') site.markModified('upcomingBlocks');
+  }
+  return promoted;
 }
 
 /**
@@ -133,15 +175,17 @@ async function reconcileAllSites() {
 
   const candidates = await Site.find({
     mediaStatus: { $nin: OVERRIDE_STATUSES },
-    $or: [{ 'bookings.0': { $exists: true } }, { 'blockInfo.startDate': { $exists: true } }],
+    $or: [{ 'bookings.0': { $exists: true } }, { 'blockInfo.startDate': { $exists: true } }, { 'upcomingBlocks.0': { $exists: true } }],
   });
   let updated = 0;
   for (const site of candidates) {
     const previousStatus = site.mediaStatus;
     const previousBookingId = site.bookingInfo?.bookingId;
     const previousEndDate = DATED_STATUSES.includes(previousStatus) ? site.blockInfo?.endDate : site.bookingInfo?.endDate;
-    const pendingBlockStart = site.blockInfo?.startDate;
-    resolveSiteStatus(site);
+    const currentBlockStart = site.blockInfo?.startDate;
+    const { promotedBlock } = resolveSiteStatus(site);
+    // A waiting period that just moved in started on its own Start Date.
+    const pendingBlockStart = promotedBlock?.startDate || currentBlockStart;
     const changed = previousStatus !== site.mediaStatus || previousBookingId !== site.bookingInfo?.bookingId;
     if (!changed) continue;
     // Stamp the change when it really happened, not whenever this ran: a booking/block that ran out

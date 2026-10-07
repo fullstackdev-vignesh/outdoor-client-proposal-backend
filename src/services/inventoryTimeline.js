@@ -151,6 +151,50 @@ async function syncBookingTimelineRecords(site, userId, source) {
   }
 }
 
+const BLOCK_EDIT_FIELDS = ['kind', 'customerType', 'customerName', 'startDate', 'endDate', 'reason'];
+
+function pickBlockEditFields(block) {
+  return Object.fromEntries(BLOCK_EDIT_FIELDS.map((f) => [f, f === 'kind' ? block?.kind || 'blocked' : block?.[f]]));
+}
+
+// A Blocked/Confirmed period edited while the site keeps that status (new dates, customer or reason).
+// recordStatusPeriod only writes a row when the status changes, so without this the Timeline would
+// never show the change. Adds an edit (old → new) to the period's own Timeline row and brings the row
+// up to date — like `edits` on a booking row. Call after the save, with the block as it was before.
+async function recordBlockEdit({ site, previousBlock, userId, source }) {
+  const block = site.blockInfo;
+  if (!previousBlock || !block || !['blocked', 'confirmed'].includes(site.mediaStatus)) return;
+  const previous = pickBlockEditFields(previousBlock);
+  const next = pickBlockEditFields(block);
+  if (!fieldsDiffer(previous, next, BLOCK_EDIT_FIELDS)) return;
+
+  // The period's row: the latest Blocked/Confirmed row for this site.
+  const row = await InventoryHistory.findOne({ site: site._id, status: { $in: ['blocked', 'confirmed'] } })
+    .sort({ changedAt: -1, _id: -1 })
+    .lean();
+  if (!row) return;
+  const now = nowIST();
+  await InventoryHistory.updateOne(
+    { _id: row._id },
+    {
+      $set: {
+        status: site.mediaStatus,
+        effectiveFrom: block.startDate ? new Date(block.startDate) : row.effectiveFrom,
+        effectiveTo: block.endDate ? new Date(block.endDate) : row.effectiveTo,
+        'blockSnapshot.kind': next.kind,
+        'blockSnapshot.customerType': next.customerType,
+        'blockSnapshot.customerName': next.customerName,
+        'blockSnapshot.startDate': next.startDate,
+        'blockSnapshot.endDate': next.endDate,
+        'blockSnapshot.reason': next.reason,
+        'blockSnapshot.notes': block.notes,
+        updatedAt: now,
+      },
+      $push: { blockEdits: { editedAt: now, editedBy: userId, source, previous, next } },
+    }
+  );
+}
+
 // Compares only the data fields of a booking Timeline row (not who/when/source metadata).
 const BOOKING_ROW_FIELDS = ['mediaId', 'mediaType', 'state', 'city', 'mediaImage', 'siteOwner', 'status', 'isActive', 'effectiveFrom', 'effectiveTo'];
 const BOOKING_SNAPSHOT_FIELDS = ['customerType', 'client', 'customerName', 'startDate', 'endDate', 'durationDays', 'monthlyTotalCost', 'amount'];
@@ -231,4 +275,4 @@ function buildOverlapFilter(query) {
   return filter;
 }
 
-module.exports = { recordStatusPeriod, buildOverlapFilter, nowIST, syncBookingTimelineRecords, computeBookingLifecycle };
+module.exports = { recordStatusPeriod, recordBlockEdit, buildOverlapFilter, nowIST, syncBookingTimelineRecords, computeBookingLifecycle };

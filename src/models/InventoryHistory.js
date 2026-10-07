@@ -14,6 +14,15 @@ const bookingEditSnapshot = () => ({
   amount: Number,
 });
 
+const blockEditSnapshot = () => ({
+  kind: String,
+  customerType: String,
+  customerName: String,
+  startDate: Date,
+  endDate: Date,
+  reason: String,
+});
+
 const inventoryHistorySchema = new mongoose.Schema({
   site: { type: mongoose.Schema.Types.ObjectId, ref: 'Site', required: true, index: true },
   mediaId: { type: String, required: true },
@@ -98,6 +107,18 @@ const inventoryHistorySchema = new mongoose.Schema({
       source: { type: String, enum: ['sites', 'inventory'] },
       previous: bookingEditSnapshot(),
       next: bookingEditSnapshot(),
+    },
+  ],
+  // Blocked / Confirmed rows only: every edit to the period's customer/dates/reason, oldest first —
+  // same idea as `edits` for bookings (blockSnapshot always holds the latest values).
+  blockEdits: [
+    {
+      _id: false,
+      editedAt: Date,
+      editedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      source: { type: String, enum: ['sites', 'inventory'] },
+      previous: blockEditSnapshot(),
+      next: blockEditSnapshot(),
     },
   ],
 });

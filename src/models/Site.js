@@ -87,6 +87,26 @@ const blockInfoSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// Further Blocked/Confirmed periods added with "+ Add Blocked" / "+ Add Confirmed" while the site
+// already has one (blockInfo). Each waits here until its Start Date, then becomes the site's blockInfo
+// (services/bookingScheduler.js#resolveSiteStatus) — like an Upcoming booking becoming Active.
+const upcomingBlockSchema = new mongoose.Schema(
+  {
+    blockId: { type: String, required: true },
+    kind: { type: String, enum: ['blocked', 'confirmed'], default: 'blocked' },
+    reason: String,
+    notes: String,
+    customerType: { type: String, enum: ['client', 'agency'] },
+    client: { type: mongoose.Schema.Types.ObjectId, ref: 'Client' },
+    customerName: String,
+    startDate: { type: Date, required: true },
+    endDate: { type: Date, required: true },
+    blockedDate: { type: Date, default: nowIST },
+    blockedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  },
+  { _id: false }
+);
+
 // Fields that represent Site MASTER data — changing any of these bumps `updatedAt` only.
 const MASTER_FIELDS = [
   'mediaId', 'mediaName', 'mediaType', 'quantity', 'state', 'city', 'location', 'areaName',
@@ -99,7 +119,7 @@ const MASTER_FIELDS = [
 
 // Fields that represent live Inventory/status/booking state — changing any of these bumps
 // `inventoryUpdatedAt` only. A single save can bump BOTH if it touches both groups.
-const INVENTORY_FIELDS = ['mediaStatus', 'bookingInfo', 'bookings', 'blockInfo', 'statusInfo'];
+const INVENTORY_FIELDS = ['mediaStatus', 'bookingInfo', 'bookings', 'blockInfo', 'upcomingBlocks', 'statusInfo'];
 
 const siteSchema = new mongoose.Schema(
   {
@@ -153,6 +173,7 @@ const siteSchema = new mongoose.Schema(
     bookingInfo: bookingInfoSchema,
     bookings: { type: [bookingRecordSchema], default: [] },
     blockInfo: blockInfoSchema,
+    upcomingBlocks: { type: [upcomingBlockSchema], default: [] },
     statusInfo: statusInfoSchema,
     assignedTL: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

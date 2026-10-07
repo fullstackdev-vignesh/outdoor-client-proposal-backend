@@ -11,6 +11,8 @@ const {
   setSiteActive,
   changeStatus,
   cancelBooking,
+  addUpcomingBlock,
+  cancelUpcomingBlock,
   bulkChangeStatus,
   bulkImport,
   uploadImage,
@@ -58,6 +60,9 @@ router.patch('/bulk-status', authorize('admin', 'tl', 'user', 'bd'), bulkChangeS
 router.put('/:id', authorize('admin', 'tl', 'user', 'bd'), uploadFields, updateSite);
 router.patch('/:id/status', authorize('admin', 'tl', 'user', 'bd'), changeStatus);
 router.patch('/:id/bookings/:bookingId/cancel', authorize('admin', 'tl', 'user', 'bd'), cancelBooking);
+router.post('/:id/upcoming-blocks', authorize('admin', 'tl', 'user', 'bd'), addUpcomingBlock);
+router.put('/:id/upcoming-blocks/:blockId', authorize('admin', 'tl', 'user', 'bd'), addUpcomingBlock);
+router.patch('/:id/upcoming-blocks/:blockId/cancel', authorize('admin', 'tl', 'user', 'bd'), cancelUpcomingBlock);
 // Deleting a site is admin-only — TL, BD and User roles cannot delete.
 router.patch('/:id/active', authorize('admin', 'tl', 'user', 'bd'), setSiteActive);
 router.delete('/:id', authorize('admin'), deleteSite);

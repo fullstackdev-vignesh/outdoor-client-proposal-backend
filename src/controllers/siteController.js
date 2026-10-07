@@ -7,7 +7,7 @@ const { saveMediaImage } = require('../utils/imageStorage');
 const { calcDurationDays, calcBookingAmount, formatDateLabel, findOverlappingBooking, todayDateOnly } = require('../utils/bookingCalc');
 const { formatIST } = require('../utils/formatDate');
 const InventoryHistory = require('../models/InventoryHistory');
-const { recordStatusPeriod, buildOverlapFilter, syncBookingTimelineRecords, computeBookingLifecycle } = require('../services/inventoryTimeline');
+const { recordStatusPeriod, recordBlockEdit, buildOverlapFilter, syncBookingTimelineRecords, computeBookingLifecycle } = require('../services/inventoryTimeline');
 const { genBookingId, resolveSiteStatus } = require('../services/bookingScheduler');
 const { illuminationLabel } = require('../utils/illuminationLabel');
 const { MEDIA_STATUSES, DATED_STATUSES, MANUAL_STATUSES, normalizeStatus } = require('../config/siteStatus');
@@ -154,6 +154,18 @@ function blockOverlapMessage(block, startDate, endDate) {
   return clash ? `This site is ${what} from ${formatDateLabel(block.startDate)} to ${formatDateLabel(block.endDate)}.` : null;
 }
 
+// Same check against the further Blocked/Confirmed periods waiting in site.upcomingBlocks.
+function upcomingBlocksOverlapMessage(upcomingBlocks, startDate, endDate, excludeBlockId) {
+  for (const block of upcomingBlocks || []) {
+    if (excludeBlockId && block.blockId === excludeBlockId) continue;
+    const message = blockOverlapMessage(block, startDate, endDate);
+    if (message) return message;
+  }
+  return null;
+}
+
+const genBlockId = () => `BL-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(16).slice(2, 6).toUpperCase()}`;
+
 // Making a site Inactive needs a reason (kept on the site and shown against it); making it Active
 // again clears it. Returns an error message, or null. `wasActive` is the site's state before the save.
 function applyInactiveReason(target, reason, wasActive) {
@@ -205,6 +217,8 @@ async function applyManualStatus(target, status, input, user, before = null) {
       if (overlap) {
         return `This site is booked from ${formatDateLabel(overlap.startDate)} to ${formatDateLabel(overlap.endDate)} — the ${label.toLowerCase()} dates can't overlap a booking.`;
       }
+      const upcomingClash = upcomingBlocksOverlapMessage(target.upcomingBlocks, startDate, endDate);
+      if (upcomingClash) return upcomingClash;
       const client = await Client.findById(input.blockClient).select('name customerType').lean();
       if (!client) return 'Selected customer could not be found';
       target.blockInfo = {
@@ -517,7 +531,7 @@ function buildBookingRecord(site, input, userId, existingBooking) {
   if (overlap) {
     throw new Error(`This site is already booked from ${formatDateLabel(overlap.startDate)} to ${formatDateLabel(overlap.endDate)}.`);
   }
-  const blockClash = blockOverlapMessage(site.blockInfo, startDate, endDate);
+  const blockClash = blockOverlapMessage(site.blockInfo, startDate, endDate) || upcomingBlocksOverlapMessage(site.upcomingBlocks, startDate, endDate);
   if (blockClash) throw new Error(blockClash);
 
   const durationDays = calcDurationDays(startDate, endDate);
@@ -589,7 +603,9 @@ function buildBookingsArray(site, incomingBookings, userId) {
     if (overlap) {
       throw new Error(`This site is already booked from ${formatDateLabel(overlap.startDate)} to ${formatDateLabel(overlap.endDate)}.`);
     }
-    const blockClash = blockOverlapMessage(site.blockInfo, input.startDate, input.endDate);
+    const blockClash =
+      blockOverlapMessage(site.blockInfo, input.startDate, input.endDate) ||
+      upcomingBlocksOverlapMessage(site.upcomingBlocks, input.startDate, input.endDate);
     if (blockClash) throw new Error(blockClash);
     if (!input.client) throw new Error('Customer is required for every booking');
     if (!input.startDate || !input.endDate) throw new Error('Start Date and End Date are required for every booking');
@@ -788,6 +804,8 @@ const updateSite = asyncHandler(async (req, res) => {
   const statusChanged = beforeStatus !== site.mediaStatus || beforeBookingId !== site.bookingInfo?.bookingId;
   if (statusChanged) {
     await recordStatusPeriod({ site, previousStatus: beforeStatus, source: 'sites', userId: req.user._id });
+  } else {
+    await recordBlockEdit({ site, previousBlock: before.blockInfo, userId: req.user._id, source: 'sites' });
   }
   // Unconditional (not gated by statusChanged): every booking in the array — active,
   // upcoming or completed — must show up/refresh in Timeline as soon as it's saved, not
@@ -932,6 +950,9 @@ const changeStatus = asyncHandler(async (req, res) => {
     // An optional reason typed when changing to Immediate is kept on that Timeline entry.
     const changeReason = String(req.body.changeReason || '').trim();
     await recordStatusPeriod({ site, previousStatus: beforeStatus, source: resolvedSource, userId: req.user._id, reason: changeReason || undefined });
+  } else {
+    // Same status, but the Blocked/Confirmed period's dates/customer/reason may have been edited.
+    await recordBlockEdit({ site, previousBlock: before.blockInfo, userId: req.user._id, source: resolvedSource });
   }
   await syncBookingTimelineRecords(site, req.user._id, resolvedSource);
   const changedAt = nowIST();
@@ -986,6 +1007,137 @@ const cancelBooking = asyncHandler(async (req, res) => {
   await syncBookingTimelineRecords(site, req.user._id, resolvedSource);
   await logBookingCancellation(site._id, booking, req.user._id, nowIST());
 
+  res.json({ ...site.toObject(), mediaCode: site.mediaId });
+});
+
+// "+ Add Blocked" / "+ Add Confirmed" — adds another Blocked/Confirmed period (another customer or
+// later dates) to a site that already has one, without touching the current period — the same idea
+// as "+ Add Booking". It waits in site.upcomingBlocks and becomes the site's block on its Start Date
+// (services/bookingScheduler.js). It can't overlap the current period, a booking, or another waiting period.
+const addUpcomingBlock = asyncHandler(async (req, res) => {
+  const site = await Site.findById(req.params.id);
+  if (!site) {
+    res.status(404);
+    throw new Error('Site not found');
+  }
+  const fail = (message) => {
+    res.status(400);
+    throw new Error(message);
+  };
+  if (site.isActive === false) fail('This site is Inactive — make it Active before changing its status.');
+  // With :blockId (PUT) this edits that waiting period instead — same checks, its own dates excluded.
+  const editing = req.params.blockId ? (site.upcomingBlocks || []).find((b) => b.blockId === req.params.blockId) : null;
+  if (req.params.blockId && !editing) {
+    res.status(404);
+    throw new Error('Upcoming period not found');
+  }
+
+  const kind = normalizeStatus(req.body.kind || editing?.kind);
+  if (!DATED_STATUSES.includes(kind)) fail('Invalid status — only Blocked or Confirmed can be added');
+  const label = kind === 'confirmed' ? 'Confirm' : 'Block';
+  const reason = String(req.body.blockReason || '').trim();
+  const notes = String(req.body.blockNotes || '').trim();
+  const startDate = String(req.body.blockStartDate || '').slice(0, 10);
+  const endDate = String(req.body.blockEndDate || '').slice(0, 10);
+  if (!req.body.blockClient) fail(`Customer is required to ${label.toLowerCase()} a site`);
+  if (!startDate || !endDate) fail(`${label} Start Date and End Date are required`);
+  if (endDate < startDate) fail(`${label} End Date must be on or after Start Date`);
+  if (startDate < todayDateOnly()) fail(`${label} Start Date cannot be before today.`);
+
+  const current = site.blockInfo;
+  if (current && (!current.startDate || !current.endDate)) {
+    fail('The current block has no End Date — edit it with dates before adding another period.');
+  }
+  if (current?.endDate && startDate <= dayKey(current.endDate)) {
+    fail(`The new ${label.toLowerCase()} period must start after the current one ends (${formatDateLabel(current.endDate)}).`);
+  }
+  const overlap = findOverlappingBooking(site.bookings, startDate, endDate);
+  if (overlap) {
+    fail(`This site is booked from ${formatDateLabel(overlap.startDate)} to ${formatDateLabel(overlap.endDate)} — the ${label.toLowerCase()} dates can't overlap a booking.`);
+  }
+  const upcomingClash = upcomingBlocksOverlapMessage(site.upcomingBlocks, startDate, endDate, editing?.blockId);
+  if (upcomingClash) fail(upcomingClash);
+
+  const client = await Client.findById(req.body.blockClient).select('name customerType').lean();
+  if (!client) fail('Selected customer could not be found');
+
+  const block = {
+    blockId: editing?.blockId || genBlockId(),
+    kind,
+    reason,
+    notes,
+    customerType: req.body.blockCustomerType === 'agency' || client.customerType === 'agency' ? 'agency' : 'client',
+    client: client._id,
+    customerName: client.name,
+    startDate,
+    endDate,
+    blockedDate: editing?.blockedDate || nowIST(),
+    blockedBy: editing?.blockedBy || req.user._id,
+  };
+  site.upcomingBlocks = editing
+    ? site.upcomingBlocks.map((b) => (b.blockId === editing.blockId ? block : b))
+    : [...(site.upcomingBlocks || []), block];
+  site.markModified('upcomingBlocks');
+
+  const beforeStatus = site.mediaStatus;
+  const beforeBookingId = site.bookingInfo?.bookingId;
+  const resolvedSource = req.body.source === 'inventory' ? 'inventory' : 'sites';
+  site.$locals.currentUserName = req.user?.name || 'System';
+  site.$locals.changeSource = resolvedSource;
+  resolveSiteStatus(site);
+  await site.save();
+
+  if (beforeStatus !== site.mediaStatus || beforeBookingId !== site.bookingInfo?.bookingId) {
+    await recordStatusPeriod({ site, previousStatus: beforeStatus, source: resolvedSource, userId: req.user._id });
+  }
+  await SiteHistory.insertMany([
+    {
+      site: site._id,
+      field: `${kind === 'confirmed' ? 'Confirmed' : 'Blocked'} ${editing ? 'Edited' : 'Added'}`,
+      oldValue: editing
+        ? `${editing.customerName || 'Customer'} (${formatDateLabel(editing.startDate)} → ${formatDateLabel(editing.endDate)})${editing.reason ? ` | Reason: ${editing.reason}` : ''}`
+        : null,
+      newValue: `${client.name} (${formatDateLabel(startDate)} → ${formatDateLabel(endDate)})${reason ? ` | Reason: ${reason}` : ''}`,
+      changedBy: req.user._id,
+      changedAt: nowIST(),
+    },
+  ]);
+  res.json({ ...site.toObject(), mediaCode: site.mediaId });
+});
+
+// Removes one waiting Blocked/Confirmed period (added with "+ Add Blocked/Confirmed") before it starts.
+const cancelUpcomingBlock = asyncHandler(async (req, res) => {
+  const site = await Site.findById(req.params.id);
+  if (!site) {
+    res.status(404);
+    throw new Error('Site not found');
+  }
+  const block = (site.upcomingBlocks || []).find((b) => b.blockId === req.params.blockId);
+  if (!block) {
+    res.status(404);
+    throw new Error('Upcoming period not found');
+  }
+  const cancelReason = String(req.body.reason || '').trim();
+  if (!cancelReason) {
+    res.status(400);
+    throw new Error('Cancellation reason is required');
+  }
+
+  site.upcomingBlocks = site.upcomingBlocks.filter((b) => b.blockId !== block.blockId);
+  site.markModified('upcomingBlocks');
+  site.$locals.currentUserName = req.user?.name || 'System';
+  site.$locals.changeSource = req.body.source === 'inventory' ? 'inventory' : 'sites';
+  await site.save();
+
+  const label = block.kind === 'confirmed' ? 'Confirmed' : 'Blocked';
+  const newValue = [
+    `${label}: ${block.customerName || 'Customer'} (${formatDateLabel(block.startDate)} → ${formatDateLabel(block.endDate)})`,
+    `Reason: ${cancelReason}`,
+    `Cancelled By: ${req.user?.name || 'System'}`,
+  ].join(' | ');
+  await SiteHistory.insertMany([
+    { site: site._id, field: `Upcoming ${label} Cancelled`, oldValue: null, newValue, changedBy: req.user._id, changedAt: nowIST() },
+  ]);
   res.json({ ...site.toObject(), mediaCode: site.mediaId });
 });
 
@@ -1061,6 +1213,8 @@ const bulkChangeStatus = asyncHandler(async (req, res) => {
     const statusChanged = beforeStatus !== site.mediaStatus || beforeBookingId !== site.bookingInfo?.bookingId;
     if (statusChanged) {
       await recordStatusPeriod({ site, previousStatus: beforeStatus, source: 'inventory', userId: req.user._id });
+    } else {
+      await recordBlockEdit({ site, previousBlock: before.blockInfo, userId: req.user._id, source: 'inventory' });
     }
     await syncBookingTimelineRecords(site, req.user._id, 'inventory');
     const changedAt = nowIST();
@@ -1094,7 +1248,11 @@ const AUTO_BLOCK_END_REASON = 'Booking ended — site was blocked';
 //     carrying `previousBooking` (before) and `bookingSnapshot` (after).
 const getSiteTimeline = asyncHandler(async (req, res) => {
   const [rows, site] = await Promise.all([
-    InventoryHistory.find({ site: req.params.id }).populate('changedBy', 'name').populate('edits.editedBy', 'name').lean(),
+    InventoryHistory.find({ site: req.params.id })
+      .populate('changedBy', 'name')
+      .populate('edits.editedBy', 'name')
+      .populate('blockEdits.editedBy', 'name')
+      .lean(),
     Site.findById(req.params.id).select('bookings.bookingId bookings.createdAt').lean(),
   ]);
   const bookingCreatedAt = new Map((site?.bookings || []).map((b) => [b.bookingId, b.createdAt]));
@@ -1105,7 +1263,38 @@ const getSiteTimeline = asyncHandler(async (req, res) => {
   for (const row of rows) {
     const isBookingRow = row.status === 'booked' || row.status === 'cancelled';
     if (!isBookingRow) {
-      events.push({ ...row, eventKey: `${row._id}`, eventAt: row.changedAt });
+      const blockEdits = row.blockEdits || [];
+      if (!blockEdits.length) {
+        events.push({ ...row, eventKey: `${row._id}`, eventAt: row.changedAt });
+        continue;
+      }
+      // Blocked/Confirmed period that was later edited: like a booking, the original step shows what
+      // it was first set as, and each edit becomes its own "Updated" step (old → new).
+      const original = blockEdits[0].previous || {};
+      events.push({
+        ...row,
+        status: original.kind || row.status,
+        blockSnapshot: { ...row.blockSnapshot, ...original },
+        effectiveFrom: original.startDate || row.effectiveFrom,
+        effectiveTo: original.endDate || row.effectiveTo,
+        eventKey: `${row._id}`,
+        eventAt: row.changedAt,
+      });
+      blockEdits.forEach((edit, i) => {
+        events.push({
+          ...row,
+          status: edit.next?.kind || row.status,
+          eventType: 'edited',
+          eventKey: `${row._id}-block-edit-${i}`,
+          eventAt: edit.editedAt,
+          changedBy: edit.editedBy,
+          source: edit.source || row.source,
+          blockSnapshot: { ...row.blockSnapshot, ...edit.next },
+          previousBlock: edit.previous,
+          effectiveFrom: edit.next?.startDate,
+          effectiveTo: edit.next?.endDate,
+        });
+      });
       continue;
     }
     const cancel = row.cancellationSnapshot || {};
@@ -1643,6 +1832,8 @@ module.exports = {
   setSiteActive,
   changeStatus,
   cancelBooking,
+  addUpcomingBlock,
+  cancelUpcomingBlock,
   bulkChangeStatus,
   bulkImport,
   uploadImage,
